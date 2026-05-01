@@ -6,7 +6,7 @@ import { VENUE_TIERS } from '@/lib/discover-config'
 import type { OpenReviewPaper } from '@/app/api/admin/openreview/route'
 
 // Detect method tags from keywords
-const METHOD_PATTERNS: [string, string][] = [
+const METHOD_PATTERNS: [string, RegExp][] = [
   ['GNN', /\b(gnn|graph neural|graph attention|graph convolution|message passing)\b/i],
   ['Diffusion', /\bdiffusion\b/i],
   ['LLM', /\b(llm|large language|gpt|instruction tun|in-context)\b/i],
