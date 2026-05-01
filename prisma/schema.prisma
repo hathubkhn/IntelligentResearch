@@ -1,0 +1,224 @@
+generator client {
+  provider        = "prisma-client-js"
+  output          = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Paper {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  collectionItems UserCollectionItem[]
+
+  title       String
+  authors     String[]
+  year        Int?
+  venue       String?
+  venueType   VenueType?
+  category    String?
+  tags        String[]
+  isPublished Boolean    @default(true)
+
+  paperUrl      String?
+  codeUrl       String?
+  openReviewUrl String?
+  arxivId       String?
+
+  rawInput String
+
+  tldr          String?
+  problem       String?
+  keyIdea       String?
+  results       String?
+  contributions String[]
+  methodDiagram       String?
+  methodDescription   String?
+
+  coverColor   String?
+  status       SummaryStatus @default(PENDING)
+  errorMessage String?
+
+  /// pgvector embedding for semantic search (text-embedding-3-small, 1536 dims)
+  /// Requires: CREATE EXTENSION IF NOT EXISTS vector; in your Postgres database
+  embedding    Unsupported("vector(1536)")?
+
+  collection   Collection? @relation(fields: [collectionId], references: [id])
+  collectionId String?
+  savedBy      SavedPaper[]
+}
+
+model Collection {
+  id          String   @id @default(cuid())
+  createdAt   DateTime @default(now())
+  name        String
+  description String?
+  sourceUrl   String?
+  papers      Paper[]
+  userId      String?
+  user        User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items       UserCollectionItem[]
+}
+
+model UserCollectionItem {
+  id           String     @id @default(cuid())
+  addedAt      DateTime   @default(now())
+  collectionId String
+  paperId      String
+  collection   Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  paper        Paper      @relation(fields: [paperId], references: [id], onDelete: Cascade)
+
+  @@unique([collectionId, paperId])
+}
+
+// ── User management (NextAuth + public OAuth users) ──────────────────────────
+
+model User {
+  id            String       @id @default(cuid())
+  createdAt     DateTime     @default(now())
+  name          String?
+  email         String?      @unique
+  emailVerified DateTime?
+  image         String?
+  accounts      Account[]
+  sessions      Session[]
+  savedPapers   SavedPaper[]
+  papers        Paper[]
+  collections   Collection[]
+
+  // Subscription & usage
+  plan                 Plan     @default(FREE)
+  discoverUsage        Int      @default(0)
+  discoverUsageResetAt DateTime @default(now())
+  subscription         Subscription?
+  discoverHistory      DiscoverHistory[]
+}
+
+model DiscoverHistory {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Search parameters
+  conference String
+  year       Int
+  topics     String  @db.Text
+  methods    String[]
+  domains    String[]
+  tasks      String[]
+  maxResults Int      @default(50)
+
+  // Results
+  matchedCount Int   @default(0)
+  // Compact paper list: [{id, title, venue, year, score, openReviewUrl}]
+  papers       Json  @default("[]")
+
+  // Optional gap analysis saved with this search
+  gapMarkdown  String? @db.Text
+  targetDomain String?
+
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+model Subscription {
+  id                     String       @id @default(cuid())
+  createdAt              DateTime     @default(now())
+  updatedAt              DateTime     @updatedAt
+  userId                 String       @unique
+  user                   User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider               String       // 'paypal'
+  providerSubscriptionId String       @unique
+  status                 String       // 'active' | 'cancelled' | 'expired'
+  billingCycle           BillingCycle
+  currentPeriodStart     DateTime
+  currentPeriodEnd       DateTime
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model SavedPaper {
+  id      String   @id @default(cuid())
+  savedAt DateTime @default(now())
+  userId  String
+  paperId String
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  paper   Paper    @relation(fields: [paperId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, paperId])
+}
+
+model Post {
+  id          String    @id @default(cuid())
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  title       String
+  slug        String    @unique
+  excerpt     String?
+  content     String    @default("")
+  coverImage  String?
+  tags        String[]  @default([])
+  published   Boolean   @default(false)
+  publishedAt DateTime?
+  readingTime Int?
+}
+
+enum VenueType {
+  CONFERENCE
+  JOURNAL
+  PREPRINT
+  WORKSHOP
+}
+
+enum Plan {
+  FREE
+  PRO
+}
+
+enum BillingCycle {
+  MONTHLY
+  ANNUAL
+}
+
+enum SummaryStatus {
+  PENDING
+  PROCESSING
+  DONE
+  ERROR
+}
