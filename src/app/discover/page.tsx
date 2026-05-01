@@ -20,6 +20,9 @@ import { DiscoverHistoryPanel, type HistoryEntry } from '@/components/discover/D
 import {
   buildKeywordsFromSelections,
   buildWorkspaceKeywords,
+  AI_METHODS,
+  APPLICATION_DOMAINS,
+  RESEARCH_TASKS,
   type Workspace,
   type SubTopic,
 } from '@/lib/discover-config'
@@ -143,12 +146,17 @@ export default function DiscoverPage() {
     triggerSearch(keywords)
   }
 
-  // ── Build topic string from current filter state ──
+  // ── Build keywords string for each group ──
+  const buildMethodKeywords = () =>
+    selectedMethods.map(m => AI_METHODS.find(o => o.label === m)?.keywords ?? '').filter(Boolean).join(', ')
+  const buildDomainKeywords = () =>
+    selectedDomains.map(d => APPLICATION_DOMAINS.find(o => o.label === d)?.keywords ?? '').filter(Boolean).join(', ')
+  const buildTaskKeywords = () =>
+    selectedTasks.map(t => RESEARCH_TASKS.find(o => o.label === t)?.keywords ?? '').filter(Boolean).join(', ')
+
+  // Legacy flat topics string (used for history saving & fallback)
   const buildTopicQuery = (overrideCustom?: string) => {
     const custom = overrideCustom ?? customKeywords
-    if (custom.trim() && selectedMethods.length === 0 && selectedDomains.length === 0 && selectedTasks.length === 0) {
-      return custom.trim()
-    }
     const fromFilters = buildKeywordsFromSelections(selectedMethods, selectedDomains, selectedTasks)
     const parts = [fromFilters, custom.trim()].filter(Boolean)
     return parts.join(', ')
@@ -156,8 +164,15 @@ export default function DiscoverPage() {
 
   // ── Search ──
   const triggerSearch = async (overrideKeywords?: string) => {
-    const topics = overrideKeywords ?? buildTopicQuery()
-    if (!topics.trim()) { toast.error('Select at least one filter or enter keywords'); return }
+    // When called with overrideKeywords (history restore), use legacy flat topics mode
+    const isLegacy = overrideKeywords !== undefined
+    const legacyTopics = isLegacy ? overrideKeywords : ''
+    if (isLegacy && !legacyTopics.trim()) { toast.error('Select at least one filter or enter keywords'); return }
+    if (!isLegacy) {
+      const hasAny = selectedMethods.length > 0 || selectedDomains.length > 0 ||
+        selectedTasks.length > 0 || customKeywords.trim()
+      if (!hasAny) { toast.error('Select at least one filter or enter keywords'); return }
+    }
     setSearching(true)
     setSearchError(null)
     setPapers([])
@@ -167,7 +182,16 @@ export default function DiscoverPage() {
     // New search = new set of papers; previous gap analysis is no longer valid
     setGapState({ status: 'idle', markdown: '' })
     try {
-      const params = new URLSearchParams({ conference, year: String(year), topics, limit: String(maxResults) })
+      const params = new URLSearchParams({ conference, year: String(year), limit: String(maxResults) })
+      if (isLegacy) {
+        params.set('topics', legacyTopics)
+      } else {
+        // Pass groups separately for AND logic
+        if (selectedMethods.length > 0) params.set('methods', buildMethodKeywords())
+        if (selectedDomains.length > 0) params.set('domains', buildDomainKeywords())
+        if (selectedTasks.length > 0)   params.set('tasks',   buildTaskKeywords())
+        if (customKeywords.trim())       params.set('custom',  customKeywords.trim())
+      }
       const res  = await fetch(`/api/openreview?${params}`)
       const data = await res.json() as { papers?: unknown[]; fetchedFromAPI?: number; matched?: number; venueId?: string; error?: string; upgrade?: boolean }
       if (res.status === 429 && data.upgrade) { setShowQuota(true); return }

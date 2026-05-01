@@ -45,31 +45,76 @@ interface ORNote {
   content: ORContent
 }
 
-function scoreNote(note: ORNote, terms: string[]): number {
-  if (terms.length === 0) return 1
-  const title = (note.content.title?.value ?? '').toLowerCase()
-  const abstract = (note.content.abstract?.value ?? '').toLowerCase()
-  const keywords = (note.content.keywords?.value ?? []).map(k => k.toLowerCase())
-  const primary = (note.content.primary_area?.value ?? note.content['primary area']?.value ?? '').toLowerCase()
-
-  let score = 0
-  for (const term of terms) {
-    const t = term.toLowerCase()
-    if (t.length < 3) continue
-    if (title.includes(t)) score += 4
-    if (primary.includes(t)) score += 3
-    if (keywords.some(k => k.includes(t))) score += 2
-    if (abstract.includes(t)) score += 1
-  }
-  return score
-}
-
 function toTerms(raw: string): string[] {
   // Split on comma/semicolon to get phrases, then also split phrases into words.
   // Both phrases and individual words are used for matching.
   const phrases = raw.split(/[,;]/).map(s => s.trim()).filter(Boolean)
   const words = phrases.flatMap(p => p.split(/\s+/))
   return [...new Set([...phrases, ...words])].filter(t => t.length >= 3)
+}
+
+function matchesGroup(note: ORNote, terms: string[]): boolean {
+  if (terms.length === 0) return true
+  const title    = (note.content.title?.value ?? '').toLowerCase()
+  const abstract = (note.content.abstract?.value ?? '').toLowerCase()
+  const kws      = (note.content.keywords?.value ?? []).map(k => k.toLowerCase())
+  const primary  = (note.content.primary_area?.value ?? note.content['primary area']?.value ?? '').toLowerCase()
+  return terms.some(t =>
+    title.includes(t) || primary.includes(t) || kws.some(k => k.includes(t)) || abstract.includes(t)
+  )
+}
+
+function scoreGroup(note: ORNote, terms: string[]): number {
+  if (terms.length === 0) return 0
+  const title    = (note.content.title?.value ?? '').toLowerCase()
+  const abstract = (note.content.abstract?.value ?? '').toLowerCase()
+  const kws      = (note.content.keywords?.value ?? []).map(k => k.toLowerCase())
+  const primary  = (note.content.primary_area?.value ?? note.content['primary area']?.value ?? '').toLowerCase()
+  let score = 0
+  for (const t of terms) {
+    if (t.length < 3) continue
+    if (title.includes(t))               score += 4
+    if (primary.includes(t))             score += 3
+    if (kws.some(k => k.includes(t)))    score += 2
+    if (abstract.includes(t))            score += 1
+  }
+  return score
+}
+
+interface TermGroups {
+  methods: string[]   // REQUIRED: must match at least one
+  custom:  string[]   // REQUIRED when non-empty AND methods non-empty
+  domains: string[]   // Soft: adds to score
+  tasks:   string[]   // Soft: adds to score
+  all:     string[]   // All terms together (legacy topics string)
+}
+
+function filterAndScore(note: ORNote, groups: TermGroups): number | null {
+  // If both methods and custom are provided, paper must satisfy BOTH (AND logic)
+  const requiredGroups: string[][] = []
+  if (groups.methods.length > 0) requiredGroups.push(groups.methods)
+  if (groups.custom.length > 0 && groups.methods.length > 0) requiredGroups.push(groups.custom)
+
+  // If only legacy `all` terms (no separated groups), use any-match
+  if (groups.methods.length === 0 && groups.custom.length === 0) {
+    if (groups.all.length === 0) return 1
+    const s = scoreGroup(note, groups.all)
+    return s > 0 ? s : null
+  }
+
+  // All required groups must match
+  for (const grp of requiredGroups) {
+    if (!matchesGroup(note, grp)) return null
+  }
+
+  // Score from all groups
+  const score =
+    scoreGroup(note, groups.methods) * 1.5 +  // methods weighted highest
+    scoreGroup(note, groups.custom)  * 1.2 +  // custom keywords also high priority
+    scoreGroup(note, groups.domains)          +
+    scoreGroup(note, groups.tasks)
+
+  return score > 0 ? score : null
 }
 
 function mapNote(note: ORNote, conference: string, year: number): OpenReviewPaper {
@@ -159,11 +204,15 @@ export async function GET(req: NextRequest) {
   const sp = new URL(req.url).searchParams
   const conference = (sp.get('conference') ?? 'ICLR').toUpperCase()
   const year = parseInt(sp.get('year') ?? '2024')
-  const topicsRaw = sp.get('topics') ?? ''
-  // How many to return to the UI
+
+  // Separated filter groups (new) — fall back to legacy `topics` if not provided
+  const methodsRaw = sp.get('methods') ?? ''
+  const domainsRaw = sp.get('domains') ?? ''
+  const tasksRaw   = sp.get('tasks')   ?? ''
+  const customRaw  = sp.get('custom')  ?? ''
+  const topicsRaw  = sp.get('topics')  ?? '' // legacy fallback
+
   const maxResults = Math.min(200, parseInt(sp.get('limit') ?? '50'))
-  // Single page fetch only (200 notes) — OpenReview can be 10-12s per request;
-  // one page gives enough papers to rank and return good results within timeout budget.
   const maxFetch = 200
 
   const venueId = VENUE_IDS[conference]?.[year]
@@ -177,23 +226,35 @@ export async function GET(req: NextRequest) {
     )
   }
 
-  const terms = toTerms(topicsRaw)
+  // Build term groups
+  const groups: TermGroups = {
+    methods: toTerms(methodsRaw),
+    domains: toTerms(domainsRaw),
+    tasks:   toTerms(tasksRaw),
+    custom:  toTerms(customRaw),
+    all:     toTerms(topicsRaw),
+  }
+
+  const hasAnyTerms = groups.methods.length > 0 || groups.domains.length > 0 ||
+    groups.tasks.length > 0 || groups.custom.length > 0 || groups.all.length > 0
 
   try {
     const { notes, fetchedCount } = await fetchNotes(venueId, maxFetch)
 
-    const results = notes
-      .map(note => {
+    const results: Array<OpenReviewPaper & { score: number }> = []
+    for (const note of notes) {
+      const score = filterAndScore(note, groups)
+      if (!hasAnyTerms || score !== null) {
         const paper = mapNote(note, conference, year)
-        paper.score = scoreNote(note, terms)
-        return paper
-      })
-      .filter(p => terms.length === 0 || p.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, maxResults)
+        paper.score = score ?? 1
+        results.push(paper)
+      }
+    }
+
+    results.sort((a, b) => b.score - a.score)
 
     return NextResponse.json({
-      papers: results,
+      papers: results.slice(0, maxResults),
       fetchedFromAPI: fetchedCount,
       matched: results.length,
       venueId,
