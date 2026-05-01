@@ -1,11 +1,11 @@
 import Link from 'next/link'
-import { FileText, CheckCircle2, Clock, XCircle, Layers, Upload, RefreshCw } from 'lucide-react'
+import { FileText, CheckCircle2, Clock, XCircle, Layers, Upload, RefreshCw, Users, Search } from 'lucide-react'
 import { prisma } from '@/lib/prisma'
 
 export const dynamic = 'force-dynamic'
 
 async function getStats() {
-  const [total, summarized, pending, errors, collections, recent] = await Promise.all([
+  const [total, summarized, pending, errors, collections, recent, totalUsers, searchUsage] = await Promise.all([
     prisma.paper.count(),
     prisma.paper.count({ where: { status: 'DONE' } }),
     prisma.paper.count({ where: { status: 'PENDING' } }),
@@ -16,22 +16,29 @@ async function getStats() {
       take: 5,
       select: { id: true, title: true, status: true, createdAt: true },
     }),
+    prisma.user.count(),
+    prisma.user.aggregate({ _sum: { discoverUsage: true } }),
   ])
-  return { total, summarized, pending, errors, collections, recent }
+  return { total, summarized, pending, errors, collections, recent, totalUsers, totalSearches: searchUsage._sum.discoverUsage ?? 0 }
 }
 
 export default async function AdminDashboard() {
-  const { total, summarized, pending, errors, collections, recent } = await getStats()
+  const { total, summarized, pending, errors, collections, recent, totalUsers, totalSearches } = await getStats()
 
   return (
     <div className="p-8">
       <h1 className="text-2xl font-bold text-white mb-8">Dashboard</h1>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-10">
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
         <StatCard icon={<FileText />} label="Total Papers" value={total} color="text-white" />
         <StatCard icon={<CheckCircle2 />} label="Summarized" value={summarized} color="text-emerald-400" />
         <StatCard icon={<Clock />} label="Pending" value={pending} color="text-amber-400" />
+      </div>
+
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-4 mb-10">
         <StatCard icon={<XCircle />} label="Errors" value={errors} color="text-red-400" />
+        <StatCard icon={<Users />} label="Total Users" value={totalUsers} color="text-blue-400" />
+        <StatCard icon={<Search />} label="Discover Searches" value={totalSearches} color="text-purple-400" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-10">
