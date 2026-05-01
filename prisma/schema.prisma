@@ -84,6 +84,7 @@ model User {
   email         String?      @unique
   emailVerified DateTime?
   image         String?
+  password      String?      // bcrypt hash for credentials auth
   accounts      Account[]
   sessions      Session[]
   savedPapers   SavedPaper[]
