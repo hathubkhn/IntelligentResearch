@@ -96,13 +96,13 @@ export function Navbar() {
             ) : isUser ? (
               <UserMenu session={session} />
             ) : (
-              <button
-                onClick={() => signIn('github')}
+              <Link
+                href="/login"
                 className="flex items-center gap-1.5 text-slate-400 hover:text-white transition-colors"
               >
                 <GitFork className="h-4 w-4" />
                 <span className="hidden sm:inline">Sign in</span>
-              </button>
+              </Link>
             )}
           </nav>
         </div>
