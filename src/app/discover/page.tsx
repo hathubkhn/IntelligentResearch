@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { useSession, signIn } from 'next-auth/react'
 import {
-  Search, Download, Loader2, CheckSquare, Square, ChevronDown,
+  Search, Download, Loader2, CheckSquare, Square,
   AlertCircle, Sparkles, BookOpen, LayoutList, PanelRight,
   X, Check, Brain, LayoutGrid, Filter, History, Trophy,
 } from 'lucide-react'
@@ -31,6 +31,17 @@ import type { OpenReviewPaper } from '@/app/api/admin/openreview/route'
 
 const CONFERENCES = ['ICLR', 'NeurIPS', 'ICML', 'COLM', 'TMLR', 'AISTATS', 'UAI'] as const
 const YEARS = [2025, 2024, 2023, 2022, 2021] as const
+
+// Which years are available per conference (mirrors VENUE_IDS in admin route)
+const VALID_VENUE_YEARS: Record<string, number[]> = {
+  ICLR:    [2022, 2023, 2024, 2025],
+  NeurIPS: [2021, 2022, 2023, 2024],
+  ICML:    [2022, 2023, 2024, 2025],
+  COLM:    [2024, 2025],
+  TMLR:    [2022, 2023, 2024, 2025],
+  AISTATS: [2024, 2025],
+  UAI:     [2023, 2024],
+}
 
 type View = 'workspaces' | 'search' | 'imported' | 'history' | 'leaderboard'
 type RightPanel = null | 'gaps' | 'related'
@@ -75,8 +86,8 @@ export default function DiscoverPage() {
   const [view, setView] = useState<View>('workspaces')
 
   // ── Filter state (3-layer) ──
-  const [conference, setConference] = useState<string>('ICLR')
-  const [year, setYear]             = useState<number>(2025)
+  const [selectedConferences, setSelectedConferences] = useState<string[]>([])   // empty = All
+  const [selectedYears, setSelectedYears]             = useState<number[]>([])   // empty = All (last 3)
   const [selectedMethods, setSelectedMethods] = useState<string[]>([])
   const [selectedDomains, setSelectedDomains] = useState<string[]>([])
   const [selectedTasks, setSelectedTasks]     = useState<string[]>([])
@@ -180,14 +191,26 @@ export default function DiscoverPage() {
     setSelected(new Set())
     setSearchMeta(null)
     setView('search')
-    // New search = new set of papers; previous gap analysis is no longer valid
     setGapState({ status: 'idle', markdown: '' })
+
+    // Resolve "All" selections — empty = use defaults
+    const confs = selectedConferences.length > 0 ? selectedConferences : [...CONFERENCES]
+    const yrs   = selectedYears.length > 0 ? selectedYears : [2025, 2024, 2023]
+
+    // Compute valid combos from the VALID_VENUE_YEARS map
+    const combos = confs.flatMap(c =>
+      yrs.filter(y => VALID_VENUE_YEARS[c]?.includes(y)).map(y => ({ c, y }))
+    )
+
     try {
-      const params = new URLSearchParams({ conference, year: String(year), limit: String(maxResults) })
+      const params = new URLSearchParams({
+        conferences: combos.map(x => x.c).join(','),
+        years:       combos.map(x => x.y).join(','),
+        limit: String(maxResults),
+      })
       if (isLegacy) {
         params.set('topics', legacyTopics)
       } else {
-        // Pass groups separately for AND logic
         if (selectedMethods.length > 0) params.set('methods', buildMethodKeywords())
         if (selectedDomains.length > 0) params.set('domains', buildDomainKeywords())
         if (selectedTasks.length > 0)   params.set('tasks',   buildTaskKeywords())
@@ -201,7 +224,6 @@ export default function DiscoverPage() {
       setPapers(resultPapers)
       setSearchMeta({ total: data.fetchedFromAPI ?? 0, matched: data.matched ?? 0, venueId: data.venueId ?? '' })
       refreshSession()
-      // Save to discovery history (fire-and-forget, only for authenticated users)
       if (isAuth && resultPapers.length > 0) {
         const compactPapers = resultPapers.slice(0, 50).map(p => ({
           id: p.openReviewId, title: p.title, venue: p.venue,
@@ -211,7 +233,7 @@ export default function DiscoverPage() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            conference, year,
+            conference: confs.join(', '), year: yrs[0],
             topics: buildTopicQuery(),
             methods: selectedMethods, domains: selectedDomains, tasks: selectedTasks,
             maxResults, matchedCount: resultPapers.length,
@@ -608,25 +630,70 @@ export default function DiscoverPage() {
             {/* ── Sidebar ── */}
             <aside className="w-72 flex-shrink-0 border-r border-white/10 overflow-y-auto p-4 space-y-4">
 
-              {/* Conference + Year */}
-              <div>
-                <label className="block text-[10px] font-bold text-white/30 uppercase tracking-widest mb-2">Conference & Year</label>
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="relative">
-                    <select value={conference} onChange={e => setConference(e.target.value)}
-                      className="w-full appearance-none bg-white/5 border border-white/15 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500/50 pr-8">
-                      {CONFERENCES.map(c => <option key={c} value={c}>{c}</option>)}
-                    </select>
-                    <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-white/30 pointer-events-none" />
-                  </div>
-                  <div className="relative">
-                    <select value={year} onChange={e => setYear(Number(e.target.value))}
-                      className="w-full appearance-none bg-white/5 border border-white/15 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500/50 pr-8">
-                      {YEARS.map(y => <option key={y} value={y}>{y}</option>)}
-                    </select>
-                    <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-white/30 pointer-events-none" />
+              {/* Conference & Year — multi-select pills */}
+              <div className="space-y-3">
+                <label className="block text-[10px] font-bold text-white/30 uppercase tracking-widest">Conference & Year</label>
+
+                {/* Conferences */}
+                <div>
+                  <div className="flex flex-wrap gap-1.5">
+                    <button
+                      onClick={() => setSelectedConferences([])}
+                      className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                        selectedConferences.length === 0
+                          ? 'bg-blue-500/25 border-blue-400/50 text-blue-300'
+                          : 'bg-white/5 border-white/10 text-white/40 hover:text-white/70 hover:border-white/20'
+                      }`}
+                    >All</button>
+                    {CONFERENCES.map(c => (
+                      <button key={c}
+                        onClick={() => setSelectedConferences(prev =>
+                          prev.includes(c) ? prev.filter(x => x !== c) : [...prev, c]
+                        )}
+                        className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                          selectedConferences.includes(c)
+                            ? 'bg-blue-500/25 border-blue-400/50 text-blue-300'
+                            : 'bg-white/5 border-white/10 text-white/40 hover:text-white/70 hover:border-white/20'
+                        }`}
+                      >{c}</button>
+                    ))}
                   </div>
                 </div>
+
+                {/* Years */}
+                <div>
+                  <div className="flex flex-wrap gap-1.5">
+                    <button
+                      onClick={() => setSelectedYears([])}
+                      className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                        selectedYears.length === 0
+                          ? 'bg-violet-500/25 border-violet-400/50 text-violet-300'
+                          : 'bg-white/5 border-white/10 text-white/40 hover:text-white/70 hover:border-white/20'
+                      }`}
+                    >All</button>
+                    {YEARS.map(y => (
+                      <button key={y}
+                        onClick={() => setSelectedYears(prev =>
+                          prev.includes(y) ? prev.filter(x => x !== y) : [...prev, y]
+                        )}
+                        className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                          selectedYears.includes(y)
+                            ? 'bg-violet-500/25 border-violet-400/50 text-violet-300'
+                            : 'bg-white/5 border-white/10 text-white/40 hover:text-white/70 hover:border-white/20'
+                        }`}
+                      >{y}</button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Summary of active selection */}
+                {(selectedConferences.length > 0 || selectedYears.length > 0) && (
+                  <p className="text-[10px] text-white/30 leading-relaxed">
+                    {selectedConferences.length === 0 ? 'All conferences' : selectedConferences.join(', ')}
+                    {' · '}
+                    {selectedYears.length === 0 ? 'last 3 years' : selectedYears.join(', ')}
+                  </p>
+                )}
               </div>
 
               {/* 3-layer filter */}
