@@ -1,13 +1,25 @@
 'use client'
 
 import { useState, useEffect, use, useRef } from 'react'
-import { ArrowLeft, Save, RefreshCw, Loader2, Upload, X, ImageIcon } from 'lucide-react'
+import { ArrowLeft, Save, RefreshCw, Loader2, Upload, X, ImageIcon, ChevronDown } from 'lucide-react'
 import Link from 'next/link'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { SummaryStatusIndicator } from '@/components/admin/SummaryStatusIndicator'
 import type { Paper } from '@/types/paper'
+
+interface Category { id: string; name: string; color: string }
+
+const COLOR_CLS: Record<string, string> = {
+  blue:    'bg-blue-500/20 text-blue-300 border-blue-500/30',
+  violet:  'bg-violet-500/20 text-violet-300 border-violet-500/30',
+  emerald: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30',
+  amber:   'bg-amber-500/20 text-amber-300 border-amber-500/30',
+  rose:    'bg-rose-500/20 text-rose-300 border-rose-500/30',
+  cyan:    'bg-cyan-500/20 text-cyan-300 border-cyan-500/30',
+  orange:  'bg-orange-500/20 text-orange-300 border-orange-500/30',
+}
 
 interface Props {
   params: Promise<{ id: string }>
@@ -16,15 +28,15 @@ interface Props {
 export default function EditPaperPage({ params }: Props) {
   const { id } = use(params)
   const [paper, setPaper] = useState<Paper | null>(null)
+  const [categories, setCategories] = useState<Category[]>([])
   const [saving, setSaving] = useState(false)
   const [summarizing, setSummarizing] = useState(false)
   const [uploading, setUploading] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    fetch(`/api/papers/${id}`)
-      .then(r => r.json())
-      .then(setPaper)
+    fetch(`/api/papers/${id}`).then(r => r.json()).then(setPaper)
+    fetch('/api/admin/categories').then(r => r.json()).then(setCategories)
   }, [id])
 
   const save = async () => {
@@ -159,7 +171,11 @@ export default function EditPaperPage({ params }: Props) {
           </Field>
         </div>
         <Field label="Category">
-          <Input value={paper.category ?? ''} onChange={e => setPaper({ ...paper, category: e.target.value })} />
+          <CategorySelect
+            value={paper.category ?? ''}
+            categories={categories}
+            onChange={v => setPaper({ ...paper, category: v || null })}
+          />
         </Field>
         <div className="grid grid-cols-2 gap-4">
           <Field label="Paper URL">
@@ -349,6 +365,83 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
     <div>
       <label className="block text-sm text-white/60 mb-1.5">{label}</label>
       {children}
+    </div>
+  )
+}
+
+function CategorySelect({ value, categories, onChange }: {
+  value: string
+  categories: Category[]
+  onChange: (v: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  const selected = categories.find(c => c.name === value)
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between gap-2 rounded-md border border-white/20 bg-white/5 px-3 py-2 text-sm text-white hover:border-white/30 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+      >
+        {selected ? (
+          <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border ${COLOR_CLS[selected.color] ?? COLOR_CLS.blue}`}>
+            {selected.name}
+          </span>
+        ) : (
+          <span className="text-white/30">No category</span>
+        )}
+        <ChevronDown className="h-4 w-4 text-white/40 flex-shrink-0" />
+      </button>
+
+      {open && (
+        <div className="absolute z-50 mt-1 w-full rounded-xl border border-white/15 bg-slate-900 shadow-2xl overflow-hidden">
+          <div className="max-h-64 overflow-y-auto">
+            {/* None option */}
+            <button
+              type="button"
+              onClick={() => { onChange(''); setOpen(false) }}
+              className="w-full text-left px-3 py-2.5 text-sm text-white/40 hover:bg-white/5 hover:text-white/70 transition-colors"
+            >
+              — No category
+            </button>
+            {categories.map(cat => (
+              <button
+                key={cat.id}
+                type="button"
+                onClick={() => { onChange(cat.name); setOpen(false) }}
+                className={`w-full text-left px-3 py-2.5 flex items-center gap-2 hover:bg-white/5 transition-colors ${
+                  cat.name === value ? 'bg-white/5' : ''
+                }`}
+              >
+                <span className={`inline-flex items-center text-xs px-2 py-0.5 rounded-full border font-medium ${COLOR_CLS[cat.color] ?? COLOR_CLS.blue}`}>
+                  {cat.name}
+                </span>
+                {cat.name === value && <span className="ml-auto text-blue-400 text-xs">✓</span>}
+              </button>
+            ))}
+          </div>
+          <div className="border-t border-white/10 px-3 py-2">
+            <Link
+              href="/admin/categories"
+              target="_blank"
+              className="text-xs text-blue-400/70 hover:text-blue-400 transition-colors"
+            >
+              + Manage categories →
+            </Link>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

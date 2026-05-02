@@ -7,6 +7,16 @@ datasource db {
   provider = "postgresql"
 }
 
+// ── Research categories (admin-managed controlled vocabulary) ────────────────
+model Category {
+  id          String   @id @default(cuid())
+  createdAt   DateTime @default(now())
+  name        String   @unique
+  description String?
+  color       String   @default("blue") // tailwind color key: blue|violet|emerald|amber|rose|cyan|orange
+  order       Int      @default(0)
+}
+
 model Paper {
   id        String   @id @default(cuid())
   createdAt DateTime @default(now())

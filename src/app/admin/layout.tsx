@@ -1,5 +1,5 @@
 import Link from 'next/link'
-import { BookOpen, LayoutDashboard, Upload, FileText, Users, LogOut, PenLine, Library } from 'lucide-react'
+import { BookOpen, LayoutDashboard, Upload, FileText, Users, LogOut, PenLine, Library, Tag } from 'lucide-react'
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -24,6 +24,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           </NavLink>
           <NavLink href="/admin/papers" icon={<FileText className="h-4 w-4" />}>
             Papers
+          </NavLink>
+          <NavLink href="/admin/categories" icon={<Tag className="h-4 w-4" />}>
+            Categories
           </NavLink>
           <NavLink href="/admin/blog" icon={<PenLine className="h-4 w-4" />}>
             Blog
