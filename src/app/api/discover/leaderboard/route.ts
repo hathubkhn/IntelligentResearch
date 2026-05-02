@@ -4,10 +4,28 @@ import { authOptions } from '@/lib/auth'
 import OpenAI from 'openai'
 import https from 'https'
 
+export const maxDuration = 60
+
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 const SS_KEY = process.env.SEMANTIC_SCHOLAR_API_KEY ?? ''
 
-export const maxDuration = 60
+// ── In-memory cache (1 hour TTL) ───────────────────────────────────────────────
+const cache = new Map<string, { data: unknown; ts: number }>()
+const CACHE_TTL_MS = 60 * 60 * 1000
+
+function getCached(key: string) {
+  const entry = cache.get(key)
+  if (entry && Date.now() - entry.ts < CACHE_TTL_MS) return entry.data
+  cache.delete(key)
+  return null
+}
+function setCached(key: string, data: unknown) {
+  cache.set(key, { data, ts: Date.now() })
+  if (cache.size > 50) {
+    const oldest = [...cache.entries()].sort((a, b) => a[1].ts - b[1].ts)[0]
+    cache.delete(oldest[0])
+  }
+}
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 export interface PaperInput {
@@ -37,7 +55,7 @@ export interface BenchmarkTable {
   rows:         BenchmarkRow[]
 }
 
-// ── Semantic Scholar search ────────────────────────────────────────────────────
+// ── Semantic Scholar search (only used when API key is set) ────────────────────
 async function searchSemanticScholar(query: string, limit = 20): Promise<PaperInput[]> {
   const params = new URLSearchParams({
     query,
@@ -47,30 +65,28 @@ async function searchSemanticScholar(query: string, limit = 20): Promise<PaperIn
   const headers: Record<string, string> = {
     'User-Agent': 'ResearchBlog/1.0',
     'Accept': 'application/json',
+    'x-api-key': SS_KEY,
   }
-  if (SS_KEY) headers['x-api-key'] = SS_KEY
-
   const res = await fetch(
     `https://api.semanticscholar.org/graph/v1/paper/search?${params}`,
     { headers, signal: AbortSignal.timeout(15000) }
   )
-  if (!res.ok) throw new Error(`Semantic Scholar ${res.status}: ${await res.text().then(t => t.slice(0, 100))}`)
+  if (!res.ok) throw new Error(`Semantic Scholar ${res.status}: ${(await res.text()).slice(0, 120)}`)
   const data = await res.json() as { data?: Record<string, unknown>[] }
-
   return (data.data ?? [])
     .filter(p => p.abstract)
     .map(p => ({
       title:    String(p.title ?? ''),
       abstract: String(p.abstract ?? ''),
       year:     Number(p.year ?? new Date().getFullYear()),
-      url:      p.externalIds && (p.externalIds as Record<string,string>).ArXiv
-        ? `https://arxiv.org/abs/${(p.externalIds as Record<string,string>).ArXiv}`
+      url:      p.externalIds && (p.externalIds as Record<string, string>).ArXiv
+        ? `https://arxiv.org/abs/${(p.externalIds as Record<string, string>).ArXiv}`
         : `https://www.semanticscholar.org/paper/${p.paperId}`,
       id:       String(p.paperId ?? ''),
     }))
 }
 
-// ── arXiv fallback (direct IP, bypasses ISP SNI blocking) ─────────────────────
+// ── arXiv search (direct IP, bypasses ISP SNI blocking) ───────────────────────
 const ARXIV_HOST = 'export.arxiv.org'
 const ARXIV_IP   = '199.232.115.42'
 
@@ -109,7 +125,7 @@ async function searchArxiv(query: string, maxResults = 20): Promise<PaperInput[]
     if (!idM || !titleM || !absM) continue
     const arxivId = idM[1].replace(/v\d+$/, '')
     papers.push({
-      id: arxivId,
+      id:       arxivId,
       title:    titleM[1].replace(/\s+/g, ' ').trim(),
       abstract: absM[1].replace(/\s+/g, ' ').trim(),
       year:     yearM ? parseInt(yearM[1]) : new Date().getFullYear(),
@@ -124,7 +140,7 @@ async function extractBenchmarks(papers: PaperInput[], topic: string): Promise<B
   if (papers.length === 0) return []
 
   const papersText = papers
-    .slice(0, 20)  // cap at 20 to control token usage
+    .slice(0, 20)
     .map((p, i) =>
       `[${i + 1}] ${p.title} (${p.year})\nURL: ${p.url}\nABSTRACT: ${p.abstract.slice(0, 700)}`
     )
@@ -136,23 +152,22 @@ Given these paper abstracts, extract ALL concrete benchmark results reported.
 
 For each result extract:
 - model: proposed model/method name (e.g., "iTransformer", "PatchTST", "GPT-4")
-- dataset: benchmark dataset name (e.g., "ETTh1", "ETTm2", "M4", "AAAI-2024", "ImageNet")
+- dataset: benchmark dataset name (e.g., "ETTh1", "ETTm2", "M4", "ImageNet")
 - metric: evaluation metric (e.g., "MSE", "MAE", "BLEU", "F1", "Accuracy", "RMSE")
-- score: exact numeric value (number only, no units)
+- score: exact numeric value (number only)
 - score_label: display string (e.g., "0.386", "95.2%", "32.4")
-- higher_better: true if higher = better (false for error metrics: MSE, MAE, RMSE, FDE, etc.)
+- higher_better: true if higher = better (false for error metrics: MSE, MAE, RMSE, FDE)
 - paper_index: the [N] number of the source paper
 
 Rules:
-- Only extract when paper explicitly states a concrete score on a named dataset
+- Only extract when a concrete number is given on a named dataset
 - A paper may contribute MULTIPLE rows (different datasets or metrics)
-- Ignore informal comparisons like "our method achieves better performance"
-- Skip if score is missing or unknown
+- Ignore vague statements like "our method achieves better performance"
 
 Papers:
 ${papersText}
 
-Respond with ONLY valid JSON — an object with key "results" containing an array:
+Return ONLY valid JSON with key "results":
 {"results": [{"model":"...", "dataset":"...", "metric":"...", "score":0.0, "score_label":"...", "higher_better":true, "paper_index":1}]}`
 
   const resp = await openai.chat.completions.create({
@@ -166,7 +181,6 @@ Respond with ONLY valid JSON — an object with key "results" containing an arra
   try {
     const parsed = JSON.parse(resp.choices[0]?.message?.content ?? '{}')
     const arr: Record<string, unknown>[] = parsed.results ?? parsed.benchmarks ?? []
-
     return arr
       .filter(r => r.model && r.dataset && r.metric && r.score !== undefined)
       .map(r => {
@@ -190,48 +204,35 @@ Respond with ONLY valid JSON — an object with key "results" containing an arra
 // ── Aggregate into ranked tables ───────────────────────────────────────────────
 function buildTables(rows: BenchmarkRow[]): BenchmarkTable[] {
   const map = new Map<string, BenchmarkTable>()
-
   for (const row of rows) {
     const key = `${row.dataset.toLowerCase()}::${row.metric.toLowerCase()}`
-    if (!map.has(key)) {
-      map.set(key, { dataset: row.dataset, metric: row.metric, higherBetter: row.higherBetter, rows: [] })
-    }
+    if (!map.has(key)) map.set(key, { dataset: row.dataset, metric: row.metric, higherBetter: row.higherBetter, rows: [] })
     const table = map.get(key)!
     const dupe = table.rows.find(r => r.model.toLowerCase() === row.model.toLowerCase())
-    if (!dupe) {
-      table.rows.push(row)
-    } else if (row.higherBetter ? row.score > dupe.score : row.score < dupe.score) {
-      Object.assign(dupe, row)
-    }
+    if (!dupe) table.rows.push(row)
+    else if (row.higherBetter ? row.score > dupe.score : row.score < dupe.score) Object.assign(dupe, row)
   }
-
   for (const t of map.values()) {
     t.rows.sort((a, b) => t.higherBetter ? b.score - a.score : a.score - b.score)
     t.rows = t.rows.slice(0, 12)
   }
-
-  return [...map.values()]
-    .filter(t => t.rows.length >= 2)
-    .sort((a, b) => b.rows.length - a.rows.length)
-    .slice(0, 8)
+  return [...map.values()].filter(t => t.rows.length >= 2).sort((a, b) => b.rows.length - a.rows.length).slice(0, 8)
 }
 
-// ── Route handlers ─────────────────────────────────────────────────────────────
+// ── Auth helper ────────────────────────────────────────────────────────────────
 async function requireAuth(req: NextRequest) {
   const session = await getServerSession(authOptions)
   if (!session?.user) return null
   return session
 }
 
-// POST — extract from provided OpenReview/discovery papers
+// ── POST — extract from provided papers (OpenReview search results) ────────────
 export async function POST(req: NextRequest) {
   if (!await requireAuth(req)) return NextResponse.json({ error: 'Auth required' }, { status: 401 })
-
   const body = await req.json() as { papers: PaperInput[]; topic: string }
   if (!body.papers?.length) return NextResponse.json({ error: 'No papers provided' }, { status: 400 })
-
   try {
-    const rows = await extractBenchmarks(body.papers, body.topic ?? 'research')
+    const rows   = await extractBenchmarks(body.papers, body.topic ?? 'research')
     const tables = buildTables(rows)
     return NextResponse.json({ tables, extracted: rows.length, source: 'provided', papers: body.papers.length })
   } catch (err) {
@@ -239,36 +240,47 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// GET — search → extract pipeline (Semantic Scholar → arXiv fallback)
+// ── GET — search query → Semantic Scholar (with key) or arXiv → extract ────────
 export async function GET(req: NextRequest) {
   if (!await requireAuth(req)) return NextResponse.json({ error: 'Auth required' }, { status: 401 })
-
   const q = new URL(req.url).searchParams.get('q')?.trim() ?? ''
   if (!q) return NextResponse.json({ error: 'Query required' }, { status: 400 })
 
-  let papers: PaperInput[] = []
-  let source = 'semantic_scholar'
+  // Return cached result if available
+  const cacheKey = `leaderboard:${q.toLowerCase()}`
+  const cached = getCached(cacheKey)
+  if (cached) return NextResponse.json({ ...(cached as object), cached: true })
 
-  try {
-    // Stage 1: Semantic Scholar (bulk search, best quality)
-    papers = await searchSemanticScholar(q, 20)
-  } catch (ssErr) {
-    console.warn('Semantic Scholar failed, falling back to arXiv:', (ssErr as Error).message)
+  let papers: PaperInput[] = []
+  let source = 'arxiv'
+
+  // Use Semantic Scholar only when API key is configured (avoids 429 rate limits)
+  if (SS_KEY) {
+    try {
+      papers = await searchSemanticScholar(q, 20)
+      source = 'semantic_scholar'
+    } catch (err) {
+      console.warn('Semantic Scholar failed:', (err as Error).message)
+    }
+  }
+
+  // arXiv as primary (no key) or fallback
+  if (papers.length === 0) {
     source = 'arxiv'
     try {
       papers = await searchArxiv(q, 20)
-    } catch (axErr) {
-      return NextResponse.json({ error: `Both sources failed. arXiv: ${(axErr as Error).message}` }, { status: 502 })
+    } catch (err) {
+      return NextResponse.json({ error: `arXiv search failed: ${(err as Error).message}` }, { status: 502 })
     }
   }
 
   if (papers.length === 0) {
-    return NextResponse.json({ tables: [], extracted: 0, papers: 0, source, message: 'No papers found' })
+    return NextResponse.json({ tables: [], extracted: 0, papers: 0, source, message: 'No papers found on arXiv or Semantic Scholar' })
   }
 
-  // Stage 2: LLM extraction
-  const rows = await extractBenchmarks(papers, q)
+  const rows   = await extractBenchmarks(papers, q)
   const tables = buildTables(rows)
-
-  return NextResponse.json({ tables, extracted: rows.length, papers: papers.length, source, query: q })
+  const result = { tables, extracted: rows.length, papers: papers.length, source, query: q }
+  setCached(cacheKey, result)
+  return NextResponse.json(result)
 }
