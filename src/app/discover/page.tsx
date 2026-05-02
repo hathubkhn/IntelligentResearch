@@ -554,6 +554,7 @@ export default function DiscoverPage() {
             </div>
             <div className="flex-1 overflow-hidden">
               <LeaderboardPanel
+                currentPapers={papers}
                 initialQuery={buildTopicQuery()}
               />
             </div>

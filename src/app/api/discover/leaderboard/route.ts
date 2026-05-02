@@ -5,236 +5,270 @@ import OpenAI from 'openai'
 import https from 'https'
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+const SS_KEY = process.env.SEMANTIC_SCHOLAR_API_KEY ?? ''
 
 export const maxDuration = 60
 
-// ── Direct-IP HTTPS fetch (bypasses ISP SNI blocking, same technique as OpenReview) ─
-const ARXIV_HOST = 'export.arxiv.org'
-const ARXIV_IP   = '199.232.115.42'  // Fastly CDN IP for export.arxiv.org
+// ── Types ──────────────────────────────────────────────────────────────────────
+export interface PaperInput {
+  title:    string
+  abstract: string
+  year:     number
+  url:      string
+  id?:      string
+}
 
-function httpsGet(urlObj: URL): Promise<string> {
+export interface BenchmarkRow {
+  model:        string
+  score:        number
+  scoreLabel:   string
+  metric:       string
+  dataset:      string
+  year:         number
+  paperTitle:   string
+  paperUrl:     string
+  higherBetter: boolean
+}
+
+export interface BenchmarkTable {
+  dataset:      string
+  metric:       string
+  higherBetter: boolean
+  rows:         BenchmarkRow[]
+}
+
+// ── Semantic Scholar search ────────────────────────────────────────────────────
+async function searchSemanticScholar(query: string, limit = 20): Promise<PaperInput[]> {
+  const params = new URLSearchParams({
+    query,
+    fields: 'title,abstract,year,citationCount,externalIds',
+    limit: String(limit),
+  })
+  const headers: Record<string, string> = {
+    'User-Agent': 'ResearchBlog/1.0',
+    'Accept': 'application/json',
+  }
+  if (SS_KEY) headers['x-api-key'] = SS_KEY
+
+  const res = await fetch(
+    `https://api.semanticscholar.org/graph/v1/paper/search?${params}`,
+    { headers, signal: AbortSignal.timeout(15000) }
+  )
+  if (!res.ok) throw new Error(`Semantic Scholar ${res.status}: ${await res.text().then(t => t.slice(0, 100))}`)
+  const data = await res.json() as { data?: Record<string, unknown>[] }
+
+  return (data.data ?? [])
+    .filter(p => p.abstract)
+    .map(p => ({
+      title:    String(p.title ?? ''),
+      abstract: String(p.abstract ?? ''),
+      year:     Number(p.year ?? new Date().getFullYear()),
+      url:      p.externalIds && (p.externalIds as Record<string,string>).ArXiv
+        ? `https://arxiv.org/abs/${(p.externalIds as Record<string,string>).ArXiv}`
+        : `https://www.semanticscholar.org/paper/${p.paperId}`,
+      id:       String(p.paperId ?? ''),
+    }))
+}
+
+// ── arXiv fallback (direct IP, bypasses ISP SNI blocking) ─────────────────────
+const ARXIV_HOST = 'export.arxiv.org'
+const ARXIV_IP   = '199.232.115.42'
+
+function arxivFetch(urlObj: URL): Promise<string> {
   return new Promise((resolve, reject) => {
     const req = https.get({
-      hostname: ARXIV_IP,
-      port: 443,
+      hostname: ARXIV_IP, port: 443,
       path: `${urlObj.pathname}?${urlObj.searchParams.toString()}`,
-      headers: {
-        'Host': ARXIV_HOST,
-        'User-Agent': 'ResearchBlog/1.0',
-        'Accept': 'application/xml, text/xml',
-      },
-      rejectUnauthorized: false, // cert is for hostname; we connect by IP
-      servername: '',            // omit SNI — bypasses ISP SNI-based blocking
-      timeout: 30000,
+      headers: { 'Host': ARXIV_HOST, 'User-Agent': 'ResearchBlog/1.0', 'Accept': 'text/xml' },
+      rejectUnauthorized: false, servername: '', timeout: 30000,
     }, (res) => {
       const chunks: Buffer[] = []
       res.on('data', (c: Buffer) => chunks.push(c))
       res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
     })
-    req.on('timeout', () => { req.destroy(); reject(new Error('arXiv API timed out')) })
+    req.on('timeout', () => { req.destroy(); reject(new Error('arXiv timed out')) })
     req.on('error', reject)
   })
 }
 
-// ── Types ──────────────────────────────────────────────────────────────────────
-export interface BenchmarkRow {
-  model:       string
-  score:       number
-  scoreLabel:  string   // original string e.g. "0.386" or "85.2%"
-  metric:      string
-  dataset:     string
-  year:        number
-  paperTitle:  string
-  arxivId:     string | null
-  paperUrl:    string
-  higherBetter: boolean
-}
-
-export interface BenchmarkTable {
-  dataset:     string
-  metric:      string
-  higherBetter: boolean
-  rows:        BenchmarkRow[]
-}
-
-interface ArxivEntry {
-  id:       string
-  title:    string
-  abstract: string
-  year:     number
-}
-
-// ── arXiv fetch ────────────────────────────────────────────────────────────────
-async function fetchArxivPapers(query: string, maxResults = 25): Promise<ArxivEntry[]> {
+async function searchArxiv(query: string, maxResults = 20): Promise<PaperInput[]> {
   const urlObj = new URL(`https://${ARXIV_HOST}/api/query`)
   urlObj.searchParams.set('search_query', `ti:${query} OR abs:${query}`)
   urlObj.searchParams.set('sortBy', 'submittedDate')
   urlObj.searchParams.set('sortOrder', 'descending')
   urlObj.searchParams.set('max_results', String(maxResults))
 
-  const text = await httpsGet(urlObj)
-
-  // Parse Atom XML
-  const entries: ArxivEntry[] = []
-  const entryMatches = text.matchAll(/<entry>([\s\S]*?)<\/entry>/g)
-  for (const m of entryMatches) {
+  const text = await arxivFetch(urlObj)
+  const papers: PaperInput[] = []
+  for (const m of text.matchAll(/<entry>([\s\S]*?)<\/entry>/g)) {
     const block = m[1]
-    const idMatch    = block.match(/<id>https?:\/\/arxiv\.org\/abs\/([^<\s]+)<\/id>/)
-    const titleMatch = block.match(/<title[^>]*>([\s\S]*?)<\/title>/)
-    const absMatch   = block.match(/<summary[^>]*>([\s\S]*?)<\/summary>/)
-    const yearMatch  = block.match(/<published>(\d{4})/)
-    if (!idMatch || !titleMatch || !absMatch) continue
-    entries.push({
-      id:       idMatch[1].replace(/v\d+$/, ''),
-      title:    titleMatch[1].replace(/\s+/g, ' ').trim(),
-      abstract: absMatch[1].replace(/\s+/g, ' ').trim(),
-      year:     yearMatch ? parseInt(yearMatch[1]) : new Date().getFullYear(),
+    const idM    = block.match(/<id>https?:\/\/arxiv\.org\/abs\/([^<\s]+)<\/id>/)
+    const titleM = block.match(/<title[^>]*>([\s\S]*?)<\/title>/)
+    const absM   = block.match(/<summary[^>]*>([\s\S]*?)<\/summary>/)
+    const yearM  = block.match(/<published>(\d{4})/)
+    if (!idM || !titleM || !absM) continue
+    const arxivId = idM[1].replace(/v\d+$/, '')
+    papers.push({
+      id: arxivId,
+      title:    titleM[1].replace(/\s+/g, ' ').trim(),
+      abstract: absM[1].replace(/\s+/g, ' ').trim(),
+      year:     yearM ? parseInt(yearM[1]) : new Date().getFullYear(),
+      url:      `https://arxiv.org/abs/${arxivId}`,
     })
   }
-  return entries
+  return papers
 }
 
-// ── GPT extraction ─────────────────────────────────────────────────────────────
-async function extractBenchmarks(papers: ArxivEntry[], query: string): Promise<BenchmarkRow[]> {
+// ── GPT benchmark extraction ───────────────────────────────────────────────────
+async function extractBenchmarks(papers: PaperInput[], topic: string): Promise<BenchmarkRow[]> {
   if (papers.length === 0) return []
 
   const papersText = papers
-    .map((p, i) => `[${i + 1}] TITLE: ${p.title}\nARXIV_ID: ${p.id}\nYEAR: ${p.year}\nABSTRACT: ${p.abstract.slice(0, 600)}`)
+    .slice(0, 20)  // cap at 20 to control token usage
+    .map((p, i) =>
+      `[${i + 1}] ${p.title} (${p.year})\nURL: ${p.url}\nABSTRACT: ${p.abstract.slice(0, 700)}`
+    )
     .join('\n\n---\n\n')
 
-  const prompt = `You are a research benchmark extractor. Given paper abstracts about "${query}", extract all benchmark results mentioned.
+  const prompt = `You are a research benchmark extractor specializing in "${topic}".
 
-For EACH paper that reports concrete numeric scores on a benchmark/dataset, extract:
-- model: proposed model or method name
-- dataset: benchmark dataset name (e.g., "ETTh1", "ImageNet", "SQuAD 1.1")
-- metric: evaluation metric (e.g., "MSE", "MAE", "BLEU", "Accuracy", "F1")
-- score: exact numeric score (as number)
-- score_label: original string (e.g., "0.386", "95.2%", "32.4")
-- higher_better: true if higher score = better (false for MSE, MAE, RMSE, etc.)
-- paper_index: the [N] index of the paper
+Given these paper abstracts, extract ALL concrete benchmark results reported.
+
+For each result extract:
+- model: proposed model/method name (e.g., "iTransformer", "PatchTST", "GPT-4")
+- dataset: benchmark dataset name (e.g., "ETTh1", "ETTm2", "M4", "AAAI-2024", "ImageNet")
+- metric: evaluation metric (e.g., "MSE", "MAE", "BLEU", "F1", "Accuracy", "RMSE")
+- score: exact numeric value (number only, no units)
+- score_label: display string (e.g., "0.386", "95.2%", "32.4")
+- higher_better: true if higher = better (false for error metrics: MSE, MAE, RMSE, FDE, etc.)
+- paper_index: the [N] number of the source paper
 
 Rules:
-- Only extract if a concrete number is given
-- Prefer final/best results on standard benchmarks
-- Do NOT invent or estimate scores
-- Return empty array [] if no clear scores found
+- Only extract when paper explicitly states a concrete score on a named dataset
+- A paper may contribute MULTIPLE rows (different datasets or metrics)
+- Ignore informal comparisons like "our method achieves better performance"
+- Skip if score is missing or unknown
 
 Papers:
 ${papersText}
 
-Return ONLY a valid JSON array, no markdown, no explanation:
-[{"model":"...", "dataset":"...", "metric":"...", "score":0.0, "score_label":"...", "higher_better":true, "paper_index":1}, ...]`
+Respond with ONLY valid JSON — an object with key "results" containing an array:
+{"results": [{"model":"...", "dataset":"...", "metric":"...", "score":0.0, "score_label":"...", "higher_better":true, "paper_index":1}]}`
 
   const resp = await openai.chat.completions.create({
     model: 'gpt-4o-mini',
     messages: [{ role: 'user', content: prompt }],
     response_format: { type: 'json_object' },
     temperature: 0,
-    max_tokens: 2000,
+    max_tokens: 3000,
   })
 
-  let raw = resp.choices[0]?.message?.content ?? '{}'
-  // Try to extract array if wrapped in object
   try {
-    const parsed = JSON.parse(raw)
-    const arr = Array.isArray(parsed)
-      ? parsed
-      : (parsed.results ?? parsed.benchmarks ?? parsed.data ?? Object.values(parsed)[0] ?? [])
+    const parsed = JSON.parse(resp.choices[0]?.message?.content ?? '{}')
+    const arr: Record<string, unknown>[] = parsed.results ?? parsed.benchmarks ?? []
 
-    return (arr as Record<string, unknown>[])
+    return arr
       .filter(r => r.model && r.dataset && r.metric && r.score !== undefined)
       .map(r => {
-        const idx = (r.paper_index as number) - 1
+        const idx = Math.max(0, (r.paper_index as number) - 1)
         const paper = papers[idx] ?? papers[0]
         return {
-          model:        String(r.model),
+          model:        String(r.model).trim(),
           score:        Number(r.score),
           scoreLabel:   String(r.score_label ?? r.score),
-          metric:       String(r.metric),
-          dataset:      String(r.dataset),
+          metric:       String(r.metric).trim(),
+          dataset:      String(r.dataset).trim(),
           year:         paper?.year ?? new Date().getFullYear(),
           paperTitle:   paper?.title ?? '',
-          arxivId:      paper?.id ?? null,
-          paperUrl:     paper?.id ? `https://arxiv.org/abs/${paper.id}` : '',
+          paperUrl:     paper?.url ?? '',
           higherBetter: Boolean(r.higher_better),
         } as BenchmarkRow
       })
   } catch { return [] }
 }
 
-// ── Aggregate into tables ───────────────────────────────────────────────────────
-function groupIntoTables(rows: BenchmarkRow[]): BenchmarkTable[] {
+// ── Aggregate into ranked tables ───────────────────────────────────────────────
+function buildTables(rows: BenchmarkRow[]): BenchmarkTable[] {
   const map = new Map<string, BenchmarkTable>()
 
   for (const row of rows) {
-    const key = `${row.dataset}::${row.metric}`
+    const key = `${row.dataset.toLowerCase()}::${row.metric.toLowerCase()}`
     if (!map.has(key)) {
-      map.set(key, {
-        dataset:      row.dataset,
-        metric:       row.metric,
-        higherBetter: row.higherBetter,
-        rows:         [],
-      })
+      map.set(key, { dataset: row.dataset, metric: row.metric, higherBetter: row.higherBetter, rows: [] })
     }
     const table = map.get(key)!
-    // Avoid duplicate models — keep best score
-    const existing = table.rows.find(r => r.model.toLowerCase() === row.model.toLowerCase())
-    if (!existing) {
+    const dupe = table.rows.find(r => r.model.toLowerCase() === row.model.toLowerCase())
+    if (!dupe) {
       table.rows.push(row)
-    } else if (row.higherBetter ? row.score > existing.score : row.score < existing.score) {
-      Object.assign(existing, row)
+    } else if (row.higherBetter ? row.score > dupe.score : row.score < dupe.score) {
+      Object.assign(dupe, row)
     }
   }
 
-  // Sort rows within each table
-  for (const table of map.values()) {
-    table.rows.sort((a, b) =>
-      table.higherBetter ? b.score - a.score : a.score - b.score
-    )
-    // Keep top 10 per table
-    table.rows = table.rows.slice(0, 10)
+  for (const t of map.values()) {
+    t.rows.sort((a, b) => t.higherBetter ? b.score - a.score : a.score - b.score)
+    t.rows = t.rows.slice(0, 12)
   }
 
-  // Only return tables with >= 2 entries and sort by row count
   return [...map.values()]
     .filter(t => t.rows.length >= 2)
     .sort((a, b) => b.rows.length - a.rows.length)
-    .slice(0, 8) // max 8 tables
+    .slice(0, 8)
 }
 
-// ── Route ──────────────────────────────────────────────────────────────────────
-export async function GET(req: NextRequest) {
+// ── Route handlers ─────────────────────────────────────────────────────────────
+async function requireAuth(req: NextRequest) {
   const session = await getServerSession(authOptions)
-  if (!session?.user) {
-    return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
-  }
+  if (!session?.user) return null
+  return session
+}
 
-  const query = new URL(req.url).searchParams.get('q') ?? ''
-  if (!query.trim()) {
-    return NextResponse.json({ error: 'Query is required' }, { status: 400 })
-  }
+// POST — extract from provided OpenReview/discovery papers
+export async function POST(req: NextRequest) {
+  if (!await requireAuth(req)) return NextResponse.json({ error: 'Auth required' }, { status: 401 })
+
+  const body = await req.json() as { papers: PaperInput[]; topic: string }
+  if (!body.papers?.length) return NextResponse.json({ error: 'No papers provided' }, { status: 400 })
 
   try {
-    // 1. Fetch papers from arXiv
-    const papers = await fetchArxivPapers(query.trim(), 25)
-    if (papers.length === 0) {
-      return NextResponse.json({ tables: [], papers: 0, message: 'No papers found on arXiv' })
-    }
-
-    // 2. Extract benchmark rows via GPT
-    const rows = await extractBenchmarks(papers, query.trim())
-
-    // 3. Group into tables
-    const tables = groupIntoTables(rows)
-
-    return NextResponse.json({
-      tables,
-      papers: papers.length,
-      extracted: rows.length,
-      query: query.trim(),
-    })
+    const rows = await extractBenchmarks(body.papers, body.topic ?? 'research')
+    const tables = buildTables(rows)
+    return NextResponse.json({ tables, extracted: rows.length, source: 'provided', papers: body.papers.length })
   } catch (err) {
-    console.error('Leaderboard error:', err)
     return NextResponse.json({ error: (err as Error).message }, { status: 500 })
   }
+}
+
+// GET — search → extract pipeline (Semantic Scholar → arXiv fallback)
+export async function GET(req: NextRequest) {
+  if (!await requireAuth(req)) return NextResponse.json({ error: 'Auth required' }, { status: 401 })
+
+  const q = new URL(req.url).searchParams.get('q')?.trim() ?? ''
+  if (!q) return NextResponse.json({ error: 'Query required' }, { status: 400 })
+
+  let papers: PaperInput[] = []
+  let source = 'semantic_scholar'
+
+  try {
+    // Stage 1: Semantic Scholar (bulk search, best quality)
+    papers = await searchSemanticScholar(q, 20)
+  } catch (ssErr) {
+    console.warn('Semantic Scholar failed, falling back to arXiv:', (ssErr as Error).message)
+    source = 'arxiv'
+    try {
+      papers = await searchArxiv(q, 20)
+    } catch (axErr) {
+      return NextResponse.json({ error: `Both sources failed. arXiv: ${(axErr as Error).message}` }, { status: 502 })
+    }
+  }
+
+  if (papers.length === 0) {
+    return NextResponse.json({ tables: [], extracted: 0, papers: 0, source, message: 'No papers found' })
+  }
+
+  // Stage 2: LLM extraction
+  const rows = await extractBenchmarks(papers, q)
+  const tables = buildTables(rows)
+
+  return NextResponse.json({ tables, extracted: rows.length, papers: papers.length, source, query: q })
 }
