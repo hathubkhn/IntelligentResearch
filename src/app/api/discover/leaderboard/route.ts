@@ -57,10 +57,39 @@ export interface BenchmarkTable {
   rows:         BenchmarkRow[]
 }
 
+// ── Semantic re-ranking (query + paper embeddings → cosine similarity) ────────
+// Runs in a single batched OpenAI embedding call. Very cheap (~$0.0002 per search).
+async function semanticRank(query: string, papers: PaperInput[], topK = 20): Promise<PaperInput[]> {
+  if (papers.length <= topK) return papers
+  try {
+    const texts = [
+      query,
+      ...papers.map(p => `${p.title}\n${(p.keywords ?? []).join(', ')}\n${p.abstract}`.slice(0, 2000)),
+    ]
+    const resp = await openai.embeddings.create({ model: 'text-embedding-3-small', input: texts })
+    const embs = resp.data.map(d => d.embedding)
+    const qEmb = embs[0]
+
+    function cos(a: number[], b: number[]) {
+      let dot = 0, na = 0, nb = 0
+      for (let i = 0; i < a.length; i++) { dot += a[i]*b[i]; na += a[i]*a[i]; nb += b[i]*b[i] }
+      return dot / (Math.sqrt(na) * Math.sqrt(nb))
+    }
+
+    return papers
+      .map((p, i) => ({ p, score: cos(qEmb, embs[i + 1]) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK)
+      .map(x => x.p)
+  } catch (err) {
+    console.warn('[Leaderboard] Semantic re-rank failed, using original order:', (err as Error).message)
+    return papers.slice(0, topK)
+  }
+}
+
 // ── OpenReview search (PRIMARY source) ────────────────────────────────────────
-// Uses direct IP connection to bypass ISP SNI blocking (same trick as admin route).
-// Queries the full-text search endpoint: GET /notes?term=<query>
-// Filters to last 3 years automatically.
+// Stage 1: broad full-text fetch (term=) — casts a wide net of candidates.
+// Stage 2: semantic re-ranking (embeddings) — keeps top-K by meaning, not keywords.
 const OPENREVIEW_HOST = 'api2.openreview.net'
 const OPENREVIEW_IP   = '34.120.73.14'
 
@@ -95,7 +124,7 @@ function openreviewFetch(params: URLSearchParams): Promise<string> {
   })
 }
 
-async function searchOpenReview(query: string, limit = 50): Promise<PaperInput[]> {
+async function searchOpenReview(query: string, limit = 100): Promise<PaperInput[]> {
   const params = new URLSearchParams({ term: query, limit: String(limit), offset: '0' })
   const text = await openreviewFetch(params)
   const data = JSON.parse(text) as { notes?: ORNote[] }
@@ -304,9 +333,12 @@ export async function POST(req: NextRequest) {
   const body = await req.json() as { papers: PaperInput[]; topic: string }
   if (!body.papers?.length) return NextResponse.json({ error: 'No papers provided' }, { status: 400 })
   try {
-    const rows   = await extractBenchmarks(body.papers, body.topic ?? 'research')
+    // Semantic re-rank provided papers by topic before extraction
+    const topic = body.topic ?? 'research'
+    const ranked = await semanticRank(topic, body.papers, 20)
+    const rows   = await extractBenchmarks(ranked, topic)
     const tables = buildTables(rows)
-    return NextResponse.json({ tables, extracted: rows.length, source: 'provided', papers: body.papers.length })
+    return NextResponse.json({ tables, extracted: rows.length, source: 'provided', papers: ranked.length })
   } catch (err) {
     return NextResponse.json({ error: (err as Error).message }, { status: 500 })
   }
@@ -327,8 +359,10 @@ export async function GET(req: NextRequest) {
 
   // 1. OpenReview (primary): full-text search, latest 3 years, rich structured data
   try {
-    papers = await searchOpenReview(q, 50)
-    console.log(`[Leaderboard] OpenReview: ${papers.length} papers for "${q}"`)
+    const candidates = await searchOpenReview(q, 100)
+    // Semantic re-rank: use embeddings to keep papers most relevant to the query by meaning
+    papers = await semanticRank(q, candidates, 20)
+    console.log(`[Leaderboard] OpenReview: ${candidates.length} candidates → ${papers.length} after semantic re-rank`)
   } catch (err) {
     console.warn('[Leaderboard] OpenReview failed:', (err as Error).message)
   }
@@ -336,10 +370,11 @@ export async function GET(req: NextRequest) {
   // 2. Semantic Scholar (secondary, only with API key)
   if (papers.length < 5 && SS_KEY) {
     try {
-      const ssPapers = await searchSemanticScholar(q, 20)
-      papers = [...papers, ...ssPapers]
+      const ssCandidates = await searchSemanticScholar(q, 40)
+      const ssRanked = await semanticRank(q, ssCandidates, 15)
+      papers = [...papers, ...ssRanked]
       source = papers.length > 0 ? 'openreview+semantic_scholar' : 'semantic_scholar'
-      console.log(`[Leaderboard] +Semantic Scholar: ${ssPapers.length} papers`)
+      console.log(`[Leaderboard] +Semantic Scholar: ${ssRanked.length} papers after re-rank`)
     } catch (err) {
       console.warn('[Leaderboard] Semantic Scholar failed:', (err as Error).message)
     }
@@ -349,9 +384,10 @@ export async function GET(req: NextRequest) {
   if (papers.length < 5) {
     source = 'arxiv'
     try {
-      const axPapers = await searchArxiv(q, 25)
-      papers = [...papers, ...axPapers]
-      console.log(`[Leaderboard] +arXiv: ${axPapers.length} papers`)
+      const axCandidates = await searchArxiv(q, 40)
+      const axRanked = await semanticRank(q, axCandidates, 15)
+      papers = [...papers, ...axRanked]
+      console.log(`[Leaderboard] +arXiv: ${axRanked.length} papers after re-rank`)
     } catch (err) {
       if (papers.length === 0) {
         return NextResponse.json({ error: `All sources failed: ${(err as Error).message}` }, { status: 502 })

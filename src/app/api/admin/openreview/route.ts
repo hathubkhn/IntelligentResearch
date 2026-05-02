@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import https from 'https'
+import OpenAI from 'openai'
 
 export const maxDuration = 60 // seconds — OpenReview API can be slow (10-15s per page)
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
 // OpenReview v2: use content.venueid to get accepted papers only.
 // Papers assigned a venue ID by the PCs are accepted; rejected papers are not tagged.
@@ -133,6 +136,36 @@ function mapNote(note: ORNote, conference: string, year: number): OpenReviewPape
   }
 }
 
+// ── Semantic re-ranking ────────────────────────────────────────────────────────
+// After keyword filtering, re-rank remaining candidates by embedding cosine similarity.
+// Single batched API call: 1 query + N papers.
+async function semanticRerank<T extends { title: string; abstract: string; keywords: string[] }>(
+  query: string,
+  papers: T[],
+): Promise<T[]> {
+  if (papers.length <= 1) return papers
+  try {
+    const texts = [
+      query,
+      ...papers.map(p => `${p.title}\n${p.keywords.slice(0, 6).join(', ')}\n${p.abstract}`.slice(0, 2000)),
+    ]
+    const resp = await openai.embeddings.create({ model: 'text-embedding-3-small', input: texts })
+    const embs = resp.data.map(d => d.embedding)
+    const qEmb = embs[0]
+    function cos(a: number[], b: number[]) {
+      let dot = 0, na = 0, nb = 0
+      for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i] }
+      return dot / (Math.sqrt(na) * Math.sqrt(nb))
+    }
+    return papers
+      .map((p, i) => ({ p, score: cos(qEmb, embs[i + 1]) }))
+      .sort((a, b) => b.score - a.score)
+      .map(x => x.p)
+  } catch {
+    return papers // fall back to keyword-scored order on any error
+  }
+}
+
 // ISPs in some regions block api2.openreview.net via SNI inspection.
 // Connecting directly to the pre-resolved IP with no SNI (servername:'') bypasses this.
 // The Host header tells the server which vhost to serve; rejectUnauthorized:false is needed
@@ -253,8 +286,16 @@ export async function GET(req: NextRequest) {
 
     results.sort((a, b) => b.score - a.score)
 
+    // Semantic re-rank: use embeddings to reorder by meaning, not just keyword hits.
+    // Build a single query string from all provided filter groups.
+    const queryText = [methodsRaw, domainsRaw, tasksRaw, customRaw, topicsRaw].filter(Boolean).join(' ')
+    const pool = results.slice(0, Math.min(100, results.length)) // re-rank top-100 candidates
+    const reranked = hasAnyTerms && queryText.trim()
+      ? await semanticRerank(queryText, pool)
+      : pool
+
     return NextResponse.json({
-      papers: results.slice(0, maxResults),
+      papers: reranked.slice(0, maxResults),
       fetchedFromAPI: fetchedCount,
       matched: results.length,
       venueId,
