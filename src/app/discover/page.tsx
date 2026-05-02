@@ -5,7 +5,7 @@ import { useSession, signIn } from 'next-auth/react'
 import {
   Search, Download, Loader2, CheckSquare, Square, ChevronDown,
   AlertCircle, Sparkles, BookOpen, LayoutList, PanelRight,
-  X, Check, Brain, LayoutGrid, Filter, History,
+  X, Check, Brain, LayoutGrid, Filter, History, Trophy,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -17,6 +17,7 @@ import { RelatedPapersPanel } from '@/components/discover/RelatedPapersPanel'
 import { UsageBadge } from '@/components/discover/UsageBadge'
 import { QuotaModal } from '@/components/discover/QuotaModal'
 import { DiscoverHistoryPanel, type HistoryEntry } from '@/components/discover/DiscoverHistoryPanel'
+import { LeaderboardPanel } from '@/components/discover/LeaderboardPanel'
 import {
   buildKeywordsFromSelections,
   buildWorkspaceKeywords,
@@ -31,7 +32,7 @@ import type { OpenReviewPaper } from '@/app/api/admin/openreview/route'
 const CONFERENCES = ['ICLR', 'NeurIPS', 'ICML', 'COLM', 'TMLR', 'AISTATS', 'UAI'] as const
 const YEARS = [2025, 2024, 2023, 2022, 2021] as const
 
-type View = 'workspaces' | 'search' | 'imported' | 'history'
+type View = 'workspaces' | 'search' | 'imported' | 'history' | 'leaderboard'
 type RightPanel = null | 'gaps' | 'related'
 
 type SummarizeEvent =
@@ -525,6 +526,16 @@ export default function DiscoverPage() {
               <History className="h-3.5 w-3.5" /> History
             </button>
           )}
+          <button
+            onClick={() => setView('leaderboard')}
+            className={`flex items-center gap-1.5 px-4 py-4 text-sm border-b-2 transition-colors ${
+              view === 'leaderboard'
+                ? 'border-amber-400 text-white'
+                : 'border-transparent text-white/40 hover:text-white/70'
+            }`}
+          >
+            <Trophy className="h-3.5 w-3.5" /> Leaderboard
+          </button>
           {/* Usage badge pushed to the right */}
           {isAuth && (
             <div className="ml-auto">
@@ -533,9 +544,24 @@ export default function DiscoverPage() {
           )}
         </div>
 
-        {/* History view */}
-        {view === 'history' && isAuth && (
+        {/* Leaderboard view */}
+        {view === 'leaderboard' && (
           <div className="flex-1 overflow-hidden flex flex-col">
+            <div className="flex items-center gap-2 px-6 py-3 border-b border-white/8 flex-shrink-0">
+              <Trophy className="h-4 w-4 text-amber-400" />
+              <span className="text-sm font-semibold text-white/70">Benchmark Leaderboard</span>
+              <span className="text-[10px] text-white/30 ml-1">· AI-extracted from arXiv papers</span>
+            </div>
+            <div className="flex-1 overflow-hidden">
+              <LeaderboardPanel
+                initialQuery={buildTopicQuery()}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* History view */}
+        {view === 'history' && isAuth && (          <div className="flex-1 overflow-hidden flex flex-col">
             <div className="flex items-center gap-2 px-6 py-3 border-b border-white/8">
               <History className="h-4 w-4 text-white/40" />
               <span className="text-sm font-semibold text-white/70">Discovery History</span>
