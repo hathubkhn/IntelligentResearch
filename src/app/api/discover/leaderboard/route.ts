@@ -2,10 +2,39 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 import OpenAI from 'openai'
+import https from 'https'
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
 export const maxDuration = 60
+
+// ── Direct-IP HTTPS fetch (bypasses ISP SNI blocking, same technique as OpenReview) ─
+const ARXIV_HOST = 'export.arxiv.org'
+const ARXIV_IP   = '199.232.115.42'  // Fastly CDN IP for export.arxiv.org
+
+function httpsGet(urlObj: URL): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const req = https.get({
+      hostname: ARXIV_IP,
+      port: 443,
+      path: `${urlObj.pathname}?${urlObj.searchParams.toString()}`,
+      headers: {
+        'Host': ARXIV_HOST,
+        'User-Agent': 'ResearchBlog/1.0',
+        'Accept': 'application/xml, text/xml',
+      },
+      rejectUnauthorized: false, // cert is for hostname; we connect by IP
+      servername: '',            // omit SNI — bypasses ISP SNI-based blocking
+      timeout: 30000,
+    }, (res) => {
+      const chunks: Buffer[] = []
+      res.on('data', (c: Buffer) => chunks.push(c))
+      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+    })
+    req.on('timeout', () => { req.destroy(); reject(new Error('arXiv API timed out')) })
+    req.on('error', reject)
+  })
+}
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 export interface BenchmarkRow {
@@ -37,11 +66,13 @@ interface ArxivEntry {
 
 // ── arXiv fetch ────────────────────────────────────────────────────────────────
 async function fetchArxivPapers(query: string, maxResults = 25): Promise<ArxivEntry[]> {
-  const q = encodeURIComponent(`ti:${query} OR abs:${query}`)
-  const url = `https://export.arxiv.org/api/query?search_query=${q}&sortBy=submittedDate&sortOrder=descending&max_results=${maxResults}`
+  const urlObj = new URL(`https://${ARXIV_HOST}/api/query`)
+  urlObj.searchParams.set('search_query', `ti:${query} OR abs:${query}`)
+  urlObj.searchParams.set('sortBy', 'submittedDate')
+  urlObj.searchParams.set('sortOrder', 'descending')
+  urlObj.searchParams.set('max_results', String(maxResults))
 
-  const res  = await fetch(url, { signal: AbortSignal.timeout(20000) })
-  const text = await res.text()
+  const text = await httpsGet(urlObj)
 
   // Parse Atom XML
   const entries: ArxivEntry[] = []
