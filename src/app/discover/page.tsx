@@ -266,7 +266,7 @@ export default function DiscoverPage() {
     if (selected.size === 0) { toast.error('Select at least one paper'); return }
     const methodLabel = selectedMethods[0] ?? ''
     const domainLabel = selectedDomains[0] ?? ''
-    setCollectionName(`${domainLabel || methodLabel || conference} ${year} – Discovery`.trim())
+    setCollectionName(`${domainLabel || methodLabel || selectedConferences[0] || ''} ${selectedYears[0] ?? ''} – Discovery`.trim())
     setShowImportModal(true)
   }
 
@@ -594,8 +594,8 @@ export default function DiscoverPage() {
               refreshTrigger={historyRefreshKey}
               onRestoreSearch={(entry) => {
                 // Restore filters and re-run search
-                setConference(entry.conference)
-                setYear(entry.year)
+                setSelectedConferences(entry.conference ? [entry.conference] : [])
+                setSelectedYears(entry.year ? [entry.year] : [])
                 setSelectedMethods(entry.methods)
                 setSelectedDomains(entry.domains)
                 setSelectedTasks(entry.tasks)
@@ -873,7 +873,7 @@ export default function DiscoverPage() {
                   className="w-full bg-white/5 border border-white/15 rounded-lg px-3 py-2.5 text-sm text-white placeholder:text-white/25 focus:outline-none focus:border-blue-500/50" />
               </div>
               <div className="rounded-lg bg-white/[0.03] border border-white/8 px-3 py-2.5 text-xs text-white/50">
-                <p><span className="text-white/70">{selected.size}</span> papers · {conference} {year}</p>
+                <p><span className="text-white/70">{selected.size}</span> papers · {selectedConferences[0] ?? 'All'} {selectedYears[0] ?? ''}</p>
                 {selectedMethods.length > 0 && (
                   <p className="mt-0.5 text-white/30">{selectedMethods.join(', ')}</p>
                 )}

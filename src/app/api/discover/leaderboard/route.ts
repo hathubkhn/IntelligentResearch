@@ -125,31 +125,30 @@ async function searchOpenReview(query: string, limit = 100): Promise<PaperInput[
   const text = await openreviewFetch(params)
   const data = JSON.parse(text) as { notes?: ORNote[] }
   const minYear = CURRENT_YEAR - 2
-  return (data.notes ?? [])
-    .map(note => {
-      const c = note.content
-      const title    = c.title?.value
-      const abstract = c.abstract?.value
-      if (!title || !abstract || abstract.length < 50) return null
-      const venueStr = c.venueid?.value ?? c['venue id']?.value ?? ''
-      if (venueStr.toLowerCase().includes('rejected')) return null
-      const yearMatch = venueStr.match(/(\d{4})/)
-      const year = yearMatch ? parseInt(yearMatch[1]) : CURRENT_YEAR
-      if (year < minYear) return null
-      const pdfVal = c.pdf?.value ?? ''
-      const pdfUrl = pdfVal.startsWith('/') ? `https://openreview.net${pdfVal}` : (pdfVal || `https://openreview.net/pdf?id=${note.id}`)
-      return {
-        id:       note.id,
-        title,
-        abstract,
-        year,
-        venue:    extractVenueName(venueStr),
-        keywords: c.keywords?.value ?? [],
-        url:      `https://openreview.net/forum?id=${note.forum || note.id}`,
-        pdfUrl,
-      } satisfies PaperInput
-    })
-    .filter((p): p is PaperInput => p !== null)
+  return (data.notes ?? []).flatMap(note => {
+    const c = note.content
+    const title    = c.title?.value
+    const abstract = c.abstract?.value
+    if (!title || !abstract || abstract.length < 50) return []
+    const venueStr = c.venueid?.value ?? c['venue id']?.value ?? ''
+    if (venueStr.toLowerCase().includes('rejected')) return []
+    const yearMatch = venueStr.match(/(\d{4})/)
+    const year = yearMatch ? parseInt(yearMatch[1]) : CURRENT_YEAR
+    if (year < minYear) return []
+    const pdfVal = c.pdf?.value ?? ''
+    const pdfUrl = pdfVal.startsWith('/') ? `https://openreview.net${pdfVal}` : (pdfVal || `https://openreview.net/pdf?id=${note.id}`)
+    const paper: PaperInput = {
+      id:       note.id,
+      title,
+      abstract,
+      year,
+      venue:    extractVenueName(venueStr),
+      keywords: c.keywords?.value ?? [],
+      url:      `https://openreview.net/forum?id=${note.forum || note.id}`,
+      pdfUrl,
+    }
+    return [paper]
+  })
 }
 
 // ── arXiv search ───────────────────────────────────────────────────────────────
