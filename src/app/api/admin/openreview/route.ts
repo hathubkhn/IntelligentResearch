@@ -46,11 +46,10 @@ interface ORNote {
 }
 
 function toTerms(raw: string): string[] {
-  // Split on comma/semicolon to get phrases, then also split phrases into words.
-  // Both phrases and individual words are used for matching.
-  const phrases = raw.split(/[,;]/).map(s => s.trim()).filter(Boolean)
-  const words = phrases.flatMap(p => p.split(/\s+/))
-  return [...new Set([...phrases, ...words])].filter(t => t.length >= 3)
+  // Split on comma/semicolon to get phrases only.
+  // Phrases are matched as whole substrings — do NOT further split into single words
+  // to avoid false positives (e.g. "time" matching unrelated papers).
+  return raw.split(/[,;]/).map(s => s.trim().toLowerCase()).filter(t => t.length >= 3)
 }
 
 function matchesGroup(note: ORNote, terms: string[]): boolean {
@@ -82,39 +81,40 @@ function scoreGroup(note: ORNote, terms: string[]): number {
 }
 
 interface TermGroups {
-  methods: string[]   // REQUIRED: must match at least one
-  custom:  string[]   // REQUIRED when non-empty AND methods non-empty
-  domains: string[]   // Soft: adds to score
-  tasks:   string[]   // Soft: adds to score
-  all:     string[]   // All terms together (legacy topics string)
+  methods: string[]   // AI Method filter (REQUIRED if non-empty)
+  domains: string[]   // Application Domain filter (REQUIRED if non-empty)
+  tasks:   string[]   // Research Task filter (REQUIRED if non-empty)
+  custom:  string[]   // Additional keywords (REQUIRED if non-empty)
+  all:     string[]   // Legacy flat topics string (fallback)
 }
 
 function filterAndScore(note: ORNote, groups: TermGroups): number | null {
-  // If both methods and custom are provided, paper must satisfy BOTH (AND logic)
-  const requiredGroups: string[][] = []
-  if (groups.methods.length > 0) requiredGroups.push(groups.methods)
-  if (groups.custom.length > 0 && groups.methods.length > 0) requiredGroups.push(groups.custom)
+  // Legacy mode: single flat topics string (history re-runs)
+  const hasSeparatedGroups =
+    groups.methods.length > 0 || groups.domains.length > 0 ||
+    groups.tasks.length > 0   || groups.custom.length > 0
 
-  // If only legacy `all` terms (no separated groups), use any-match
-  if (groups.methods.length === 0 && groups.custom.length === 0) {
+  if (!hasSeparatedGroups) {
     if (groups.all.length === 0) return 1
     const s = scoreGroup(note, groups.all)
     return s > 0 ? s : null
   }
 
-  // All required groups must match
-  for (const grp of requiredGroups) {
-    if (!matchesGroup(note, grp)) return null
-  }
+  // Strict AND across ALL non-empty groups — a paper must match every provided group.
+  // Within each group, OR logic applies (any term in the group is enough).
+  if (groups.methods.length > 0 && !matchesGroup(note, groups.methods)) return null
+  if (groups.domains.length > 0 && !matchesGroup(note, groups.domains)) return null
+  if (groups.tasks.length   > 0 && !matchesGroup(note, groups.tasks))   return null
+  if (groups.custom.length  > 0 && !matchesGroup(note, groups.custom))  return null
 
-  // Score from all groups
+  // Weighted score: methods + custom highest (user's explicit intent), then domains/tasks
   const score =
-    scoreGroup(note, groups.methods) * 1.5 +  // methods weighted highest
-    scoreGroup(note, groups.custom)  * 1.2 +  // custom keywords also high priority
-    scoreGroup(note, groups.domains)          +
-    scoreGroup(note, groups.tasks)
+    scoreGroup(note, groups.methods) * 2.0 +
+    scoreGroup(note, groups.custom)  * 1.5 +
+    scoreGroup(note, groups.tasks)   * 1.2 +
+    scoreGroup(note, groups.domains) * 1.0
 
-  return score > 0 ? score : null
+  return score > 0 ? score : 1 // always positive since at least one group matched
 }
 
 function mapNote(note: ORNote, conference: string, year: number): OpenReviewPaper {
