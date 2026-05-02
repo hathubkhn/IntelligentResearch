@@ -265,8 +265,8 @@ async function getPaperText(paper: PaperInput): Promise<string> {
 }
 
 // ── Benchmark extraction ───────────────────────────────────────────────────────
-// For top-2 papers: download full PDF, find Experiments section, extract from real tables.
-// For the rest: extract from abstract only.
+// Downloads full PDFs for the 2 NEWEST papers (most current benchmarks).
+// All remaining papers contribute their abstracts as context.
 async function extractBenchmarks(
   papers: PaperInput[],
   topic: string,
@@ -274,27 +274,32 @@ async function extractBenchmarks(
 ): Promise<BenchmarkRow[]> {
   if (papers.length === 0) return []
 
-  // Download full text for top-2 papers
-  const enriched = await Promise.all(
-    papers.slice(0, 2).map(async (p, i) => {
-      onProgress?.(`Downloading paper ${i+1}/2: "${p.title.slice(0, 50)}…"`)
-      const fullText = await getPaperText(p)
-      return { ...p, fullText }
+  // Pick the 2 newest papers by year for full PDF download
+  const sorted = [...papers].sort((a, b) => b.year - a.year)
+  const top2 = sorted.slice(0, 2)
+
+  onProgress?.(`Downloading top 2 newest papers (${top2.map(p => p.year).join(', ')})…`)
+
+  const fullTexts = new Map<string, string>()
+  await Promise.all(
+    top2.map(async (p, i) => {
+      onProgress?.(`Downloading paper ${i + 1}/2: "${p.title.slice(0, 55)}…"`)
+      const text = await getPaperText(p)
+      fullTexts.set(p.id ?? p.url, text)
     })
   )
-  // Remaining papers get abstract only
-  const rest = papers.slice(2).map(p => ({ ...p, fullText: '' }))
-  const all  = [...enriched, ...rest]
 
-  const papersText = all
+  const papersText = papers
     .slice(0, 20)
     .map((p, i) => {
-      const kwLine = p.keywords?.length ? `\nKEYWORDS: ${p.keywords.slice(0, 8).join(', ')}` : ''
-      const venLine = p.venue ? `\nVENUE: ${p.venue} ${p.year}` : ''
-      const body = p.fullText
-        ? `\nEXPERIMENT SECTION (from full PDF):\n${p.fullText.slice(0, 3000)}`
+      const kwLine  = p.keywords?.length ? `\nKEYWORDS: ${p.keywords.slice(0, 8).join(', ')}` : ''
+      const venLine = p.venue ? `\nVENUE: ${p.venue} ${p.year}` : `\nYEAR: ${p.year}`
+      const key     = p.id ?? p.url
+      const ft      = fullTexts.get(key)
+      const body    = ft
+        ? `\nEXPERIMENT SECTION (full PDF):\n${ft.slice(0, 3000)}`
         : `\nABSTRACT: ${p.abstract.slice(0, 700)}`
-      return `[${i+1}] ${p.title}${venLine}${kwLine}${body}\nURL: ${p.url}`
+      return `[${i + 1}] ${p.title}${venLine}${kwLine}${body}\nURL: ${p.url}`
     })
     .join('\n\n---\n\n')
 
@@ -441,7 +446,7 @@ export async function GET(req: NextRequest) {
 
         // ── Step 3: download top-2 PDFs + extract benchmarks ─────────────────────
         send({ step: 3, status: 'extracting',
-          message: `Downloading top 2 papers for full experiment data…` })
+          message: `Downloading 2 newest papers for full experiment data…` })
 
         const rows = await extractBenchmarks(ranked, q, (msg) => {
           send({ step: 3, status: 'extracting', message: msg })
