@@ -157,7 +157,7 @@ export function LeaderboardPanel({ currentPapers = [], initialQuery = '' }: Prop
           } else if (event.step === 2 && event.status === 'ranking') {
             setStep(i, { status: 'running', message: event.message })
           } else if (event.step === 2 && event.status === 'done') {
-            setStep(i, { status: 'done', count: event.count, message: event.message })
+            setStep(i, { status: 'done', papers: event.papers, count: event.count, message: event.message })
             setStep(2, { status: 'running' })
           } else if (event.step === 3 && event.status === 'extracting') {
             setStep(i, { status: 'running', message: event.message })

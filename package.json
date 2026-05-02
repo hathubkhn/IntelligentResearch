@@ -25,7 +25,6 @@
     "@radix-ui/react-tabs": "^1.1.13",
     "@radix-ui/react-toast": "^1.2.15",
     "@types/bcryptjs": "^2.4.6",
-    "@types/pdf-parse": "^1.1.5",
     "@types/pg": "^8.20.0",
     "@upstash/redis": "^1.37.0",
     "bcryptjs": "^3.0.3",
@@ -40,7 +39,6 @@
     "next-auth": "^4.24.14",
     "openai": "^6.34.0",
     "p-limit": "^7.3.0",
-    "pdf-parse": "^2.4.5",
     "pg": "^8.20.0",
     "prisma": "^7.8.0",
     "react": "19.2.4",
@@ -50,6 +48,7 @@
     "remark-gfm": "^4.0.1",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.5.0",
+    "unpdf": "^1.6.2",
     "ws": "^8.20.0",
     "zustand": "^5.0.12"
   },

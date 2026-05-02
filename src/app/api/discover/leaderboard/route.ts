@@ -3,8 +3,6 @@ import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 import OpenAI from 'openai'
 import https from 'https'
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const pdfParse = require('pdf-parse')
 
 export const maxDuration = 60
 
@@ -205,19 +203,21 @@ async function searchArxiv(query: string, maxResults = 20): Promise<PaperInput[]
 // ── PDF download ───────────────────────────────────────────────────────────────
 function downloadPDFBuffer(pdfUrl: string, useDirectIP: boolean): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const parsed = new URL(pdfUrl)
+    const parsed  = new URL(pdfUrl)
+    // For direct-IP OpenReview requests, use the URL's own hostname in the Host header
+    const hostHeader = parsed.hostname
     const opts: https.RequestOptions = useDirectIP
       ? {
           hostname: OPENREVIEW_IP, port: 443,
           path: parsed.pathname + parsed.search,
-          headers: { 'Host': OPENREVIEW_HOST, 'User-Agent': 'ResearchBlog/1.0', 'Accept': 'application/pdf' },
-          rejectUnauthorized: false, servername: '', timeout: 25000,
+          headers: { 'Host': hostHeader, 'User-Agent': 'ResearchBlog/1.0', 'Accept': 'application/pdf' },
+          rejectUnauthorized: false, servername: '', timeout: 30000,
         }
       : {
           hostname: parsed.hostname, port: 443,
           path: parsed.pathname + parsed.search,
           headers: { 'User-Agent': 'ResearchBlog/1.0', 'Accept': 'application/pdf' },
-          timeout: 20000,
+          timeout: 25000,
         }
 
     const req = https.get(opts, (res) => {
@@ -237,17 +237,48 @@ function downloadPDFBuffer(pdfUrl: string, useDirectIP: boolean): Promise<Buffer
 }
 
 function findExperimentSection(text: string): string {
-  // Find the Experiments / Results / Evaluation section heading
-  const headingRe = /\n\s*(?:\d+\.?\d*\.?\s+)?(?:experiments?|evaluation|empirical results?|results?|benchmarks?|performance)\s*\n/gi
-  const match = headingRe.exec(text)
-  if (!match) return text.slice(0, 4000)
-  const start = match.index + match[0].length
-  // Find the next major numbered section to cap the excerpt
-  const nextRe = /\n\s*\d+\s+[A-Z][a-zA-Z ]{3,}\n/g
-  nextRe.lastIndex = start
-  const next = nextRe.exec(text)
-  const end = next ? Math.min(next.index, start + 6000) : Math.min(start + 6000, text.length)
-  return text.slice(start, end)
+  // Clean up PDF artifacts common in ICLR/NeurIPS submissions
+  const cleaned = text
+    .replace(/\b\d{3}\s+/g, '')         // strip 3-digit margin line numbers
+    .replace(/-\n([a-z])/g, '$1')       // reconnect hyphenated words
+    .replace(/\n{3,}/g, '\n\n')         // collapse excessive blank lines
+
+  // Strategy 1: Find explicit experiment/results section heading
+  const headingRe = /(?:^|\n)\s{0,6}(?:\d+\.?\d*\.?\s+)?(?:EXPERIMENTS?|Experiments?|EVALUATION|Evaluation|RESULTS?|Results?|BENCHMARKS?|Benchmarks?|EMPIRICAL|Empirical|MAIN RESULTS?|Main Results?|PERFORMANCE)\s*(?:\n|$)/gm
+  const headingMatch = headingRe.exec(cleaned)
+  if (headingMatch) {
+    const start = headingMatch.index + headingMatch[0].length
+    const nextRe = /(?:^|\n)\s{0,6}\d+\.?\s+[A-Z][a-zA-Z ]{3,}(?:\n|$)/gm
+    nextRe.lastIndex = start + 100
+    const next = nextRe.exec(cleaned)
+    const end = next ? Math.min(next.index, start + 8000) : Math.min(start + 8000, cleaned.length)
+    return cleaned.slice(start, end)
+  }
+
+  // Strategy 2: Find the densest cluster of 3-4 decimal numbers (benchmark table indicator)
+  const decimalRe = /\d+\.\d{3,4}/g
+  const positions: number[] = []
+  let dm
+  while ((dm = decimalRe.exec(cleaned)) !== null) positions.push(dm.index)
+
+  if (positions.length >= 5) {
+    const WINDOW = 2000
+    let bestStart = positions[0], bestCount = 0
+    for (let i = 0; i < positions.length; i++) {
+      const limit = positions[i] + WINDOW
+      let count = 0
+      for (let j = i; j < positions.length && positions[j] < limit; j++) count++
+      if (count > bestCount) { bestCount = count; bestStart = positions[i] }
+    }
+    if (bestCount >= 5) {
+      const start = Math.max(0, bestStart - 500)
+      return cleaned.slice(start, start + 7000)
+    }
+  }
+
+  // Strategy 3: Fallback — return from 40% through the document
+  const fallbackStart = Math.floor(cleaned.length * 0.4)
+  return cleaned.slice(fallbackStart, fallbackStart + 6000)
 }
 
 async function getPaperText(paper: PaperInput): Promise<string> {
@@ -256,9 +287,10 @@ async function getPaperText(paper: PaperInput): Promise<string> {
     const isOR   = paper.pdfUrl.includes('openreview.net')
     const buffer = await downloadPDFBuffer(paper.pdfUrl, isOR)
     if (buffer.length < 1000) return ''
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const parsed: { text: string } = await pdfParse(buffer) as any
-    return findExperimentSection(parsed.text)
+    const { getDocumentProxy, extractText } = await import('unpdf')
+    const pdf    = await getDocumentProxy(new Uint8Array(buffer))
+    const { text } = await extractText(pdf, { mergePages: true })
+    return findExperimentSection(text)
   } catch {
     return ''
   }
@@ -274,11 +306,17 @@ async function extractBenchmarks(
 ): Promise<BenchmarkRow[]> {
   if (papers.length === 0) return []
 
-  // Pick the 2 newest papers by year for full PDF download
-  const sorted = [...papers].sort((a, b) => b.year - a.year)
-  const top2 = sorted.slice(0, 2)
+  // Pick papers for PDF download:
+  // - First slot: most semantically relevant non-workshop paper (best chance of comparison tables)
+  // - Second slot: newest non-workshop paper different from first (for recency)
+  const nonWorkshop = papers.filter(p => !p.venue?.toLowerCase().includes('workshop'))
+  const candidates = nonWorkshop.length >= 2 ? nonWorkshop : papers
+  const first = candidates[0]
+  const second = [...candidates].sort((a, b) => b.year - a.year)
+    .find(p => (p.id ?? p.url) !== (first?.id ?? first?.url))
+  const top2 = [first, second].filter((p): p is PaperInput => p != null)
 
-  onProgress?.(`Downloading top 2 newest papers (${top2.map(p => p.year).join(', ')})…`)
+  onProgress?.(`Downloading papers for experiment data…`)
 
   const fullTexts = new Map<string, string>()
   await Promise.all(
@@ -297,7 +335,7 @@ async function extractBenchmarks(
       const key     = p.id ?? p.url
       const ft      = fullTexts.get(key)
       const body    = ft
-        ? `\nEXPERIMENT SECTION (full PDF):\n${ft.slice(0, 3000)}`
+        ? `\nEXPERIMENT SECTION (full PDF):\n${ft.slice(0, 5000)}`
         : `\nABSTRACT: ${p.abstract.slice(0, 700)}`
       return `[${i + 1}] ${p.title}${venLine}${kwLine}${body}\nURL: ${p.url}`
     })
@@ -309,8 +347,10 @@ async function extractBenchmarks(
 
 Analyze the paper content below (some papers include their full Experiments section, others only abstracts).
 
+Extract ALL model comparison rows from benchmark tables, including BOTH the proposed model AND all baseline methods compared against it.
+
 For each CONCRETE benchmark result found, extract:
-- model: the proposed model/method name (e.g. "iTransformer", "PatchTST")
+- model: the model/method name (e.g. "iTransformer", "PatchTST", "TimesNet", "LSTM") — include baselines too
 - dataset: the benchmark dataset name (e.g. "ETTh1", "ETTm2", "M4", "ImageNet")
 - metric: the evaluation metric (e.g. "MSE", "MAE", "BLEU", "F1", "Accuracy", "RMSE")
 - score: the exact numeric value (number only)
@@ -319,9 +359,10 @@ For each CONCRETE benchmark result found, extract:
 - paper_index: the [N] number from the source paper
 
 Focus on:
-- Tables labeled "Main results", "Comparison with SOTA", "Performance on..."
-- Rows where the proposed model is compared to baselines
-- Numeric scores reported on named standard datasets
+- Tables labeled "Main results", "Comparison with SOTA", "Performance on..." — extract EVERY row
+- The proposed model AND ALL baselines it is compared to
+- Numeric scores on named standard datasets (ETTh1/ETTh2/ETTm1/ETTm2/Weather/Traffic/Exchange/M4 for time series)
+- If a paper compares 5 models on ETTh1 MSE, extract all 5 rows
 
 Papers:
 ${papersText}
@@ -334,7 +375,7 @@ Return ONLY valid JSON:
     messages: [{ role: 'user', content: prompt }],
     response_format: { type: 'json_object' },
     temperature: 0,
-    max_tokens: 4000,
+    max_tokens: 8000,
   })
 
   try {
@@ -375,7 +416,7 @@ function buildTables(rows: BenchmarkRow[]): BenchmarkTable[] {
     t.rows.sort((a, b) => t.higherBetter ? b.score - a.score : a.score - b.score)
     t.rows = t.rows.slice(0, 12)
   }
-  return [...map.values()].filter(t => t.rows.length >= 2).sort((a, b) => b.rows.length - a.rows.length).slice(0, 8)
+  return [...map.values()].filter(t => t.rows.length >= 1).sort((a, b) => b.rows.length - a.rows.length).slice(0, 10)
 }
 
 // ── Auth helper ────────────────────────────────────────────────────────────────
