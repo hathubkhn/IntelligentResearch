@@ -107,7 +107,7 @@ function openreviewFetch(params: URLSearchParams): Promise<string> {
   return new Promise((resolve, reject) => {
     const req = https.get({
       hostname: OPENREVIEW_IP, port: 443,
-      path: `/notes?${params.toString()}`,
+      path: `/notes/search?${params.toString()}`,  // /notes/search supports term= free-text search
       headers: {
         'Host': OPENREVIEW_HOST,
         'User-Agent': 'ResearchBlog/1.0',
@@ -125,7 +125,12 @@ function openreviewFetch(params: URLSearchParams): Promise<string> {
 }
 
 async function searchOpenReview(query: string, limit = 100): Promise<PaperInput[]> {
-  const params = new URLSearchParams({ term: query, limit: String(limit), offset: '0' })
+  const params = new URLSearchParams({
+    term: query,
+    source: 'forum',   // forum = top-level paper submissions, not reviews/replies
+    limit: String(limit),
+    offset: '0',
+  })
   const text = await openreviewFetch(params)
   const data = JSON.parse(text) as { notes?: ORNote[] }
   const notes = data.notes ?? []
@@ -141,6 +146,10 @@ async function searchOpenReview(query: string, limit = 100): Promise<PaperInput[
 
       // Extract year from venueid (e.g. "ICLR.cc/2024/Conference" → 2024)
       const venueStr = c.venueid?.value ?? c['venue id']?.value ?? ''
+
+      // Skip rejected submissions
+      if (venueStr.toLowerCase().includes('rejected')) return null
+
       const yearMatch = venueStr.match(/(\d{4})/)
       const year = yearMatch ? parseInt(yearMatch[1]) : CURRENT_YEAR
 
@@ -187,53 +196,53 @@ async function searchSemanticScholar(query: string, limit = 20): Promise<PaperIn
     }))
 }
 
-// ── arXiv search (last-resort fallback, direct IP) ────────────────────────────
+// ── arXiv search (normal HTTPS — direct IP breaks Fastly CDN) ────────────────
 const ARXIV_HOST = 'export.arxiv.org'
-const ARXIV_IP   = '199.232.115.42'
+async function searchArxiv(query: string, maxResults = 20): Promise<PaperInput[]> {
+  // Wrap multi-word query in quotes for exact phrase matching
+  const phrase = query.includes(' ') ? `"${query}"` : query
+  const searchQuery = `ti:${phrase} OR abs:${phrase}`
+  const params = new URLSearchParams({
+    search_query: searchQuery,
+    sortBy: 'submittedDate',
+    sortOrder: 'descending',
+    max_results: String(maxResults),
+  })
 
-function arxivFetch(urlObj: URL): Promise<string> {
   return new Promise((resolve, reject) => {
     const req = https.get({
-      hostname: ARXIV_IP, port: 443,
-      path: `${urlObj.pathname}?${urlObj.searchParams.toString()}`,
-      headers: { 'Host': ARXIV_HOST, 'User-Agent': 'ResearchBlog/1.0', 'Accept': 'text/xml' },
-      rejectUnauthorized: false, servername: '', timeout: 30000,
+      hostname: ARXIV_HOST, port: 443,
+      path: `/api/query?${params.toString()}`,
+      headers: { 'User-Agent': 'ResearchBlog/1.0', 'Accept': 'text/xml' },
+      timeout: 20000,
     }, (res) => {
       const chunks: Buffer[] = []
       res.on('data', (c: Buffer) => chunks.push(c))
-      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8')
+        const papers: PaperInput[] = []
+        for (const m of text.matchAll(/<entry>([\s\S]*?)<\/entry>/g)) {
+          const block = m[1]
+          const idM    = block.match(/<id>https?:\/\/arxiv\.org\/abs\/([^<\s]+)<\/id>/)
+          const titleM = block.match(/<title[^>]*>([\s\S]*?)<\/title>/)
+          const absM   = block.match(/<summary[^>]*>([\s\S]*?)<\/summary>/)
+          const yearM  = block.match(/<published>(\d{4})/)
+          if (!idM || !titleM || !absM) return
+          const arxivId = idM[1].replace(/v\d+$/, '')
+          papers.push({
+            id:       arxivId,
+            title:    titleM[1].replace(/\s+/g, ' ').trim(),
+            abstract: absM[1].replace(/\s+/g, ' ').trim(),
+            year:     yearM ? parseInt(yearM[1]) : CURRENT_YEAR,
+            url:      `https://arxiv.org/abs/${arxivId}`,
+          })
+        }
+        resolve(papers)
+      })
     })
     req.on('timeout', () => { req.destroy(); reject(new Error('arXiv timed out')) })
     req.on('error', reject)
   })
-}
-
-async function searchArxiv(query: string, maxResults = 20): Promise<PaperInput[]> {
-  const urlObj = new URL(`https://${ARXIV_HOST}/api/query`)
-  urlObj.searchParams.set('search_query', `ti:${query} OR abs:${query}`)
-  urlObj.searchParams.set('sortBy', 'submittedDate')
-  urlObj.searchParams.set('sortOrder', 'descending')
-  urlObj.searchParams.set('max_results', String(maxResults))
-
-  const text = await arxivFetch(urlObj)
-  const papers: PaperInput[] = []
-  for (const m of text.matchAll(/<entry>([\s\S]*?)<\/entry>/g)) {
-    const block = m[1]
-    const idM    = block.match(/<id>https?:\/\/arxiv\.org\/abs\/([^<\s]+)<\/id>/)
-    const titleM = block.match(/<title[^>]*>([\s\S]*?)<\/title>/)
-    const absM   = block.match(/<summary[^>]*>([\s\S]*?)<\/summary>/)
-    const yearM  = block.match(/<published>(\d{4})/)
-    if (!idM || !titleM || !absM) continue
-    const arxivId = idM[1].replace(/v\d+$/, '')
-    papers.push({
-      id:       arxivId,
-      title:    titleM[1].replace(/\s+/g, ' ').trim(),
-      abstract: absM[1].replace(/\s+/g, ' ').trim(),
-      year:     yearM ? parseInt(yearM[1]) : CURRENT_YEAR,
-      url:      `https://arxiv.org/abs/${arxivId}`,
-    })
-  }
-  return papers
 }
 
 // ── GPT benchmark extraction ───────────────────────────────────────────────────
