@@ -19,9 +19,11 @@ interface Props {
 
 const MEDAL = ['🥇', '🥈', '🥉']
 const SOURCE_LABEL: Record<string, string> = {
-  provided:         '📄 from your current search',
-  semantic_scholar: '🔬 Semantic Scholar',
-  arxiv:            '📚 arXiv',
+  provided:                      '📄 from your search results',
+  openreview:                    '🏛️ OpenReview (last 3 yrs)',
+  'openreview+semantic_scholar': '🏛️ OpenReview + Semantic Scholar',
+  semantic_scholar:              '🔬 Semantic Scholar',
+  arxiv:                         '📚 arXiv',
 }
 
 const METRIC_COLOR_MAP: Record<string, string> = {

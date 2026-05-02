@@ -8,6 +8,7 @@ export const maxDuration = 60
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 const SS_KEY = process.env.SEMANTIC_SCHOLAR_API_KEY ?? ''
+const CURRENT_YEAR = new Date().getFullYear()
 
 // ── In-memory cache (1 hour TTL) ───────────────────────────────────────────────
 const cache = new Map<string, { data: unknown; ts: number }>()
@@ -34,6 +35,7 @@ export interface PaperInput {
   year:     number
   url:      string
   id?:      string
+  keywords?: string[]
 }
 
 export interface BenchmarkRow {
@@ -55,21 +57,91 @@ export interface BenchmarkTable {
   rows:         BenchmarkRow[]
 }
 
-// ── Semantic Scholar search (only used when API key is set) ────────────────────
+// ── OpenReview search (PRIMARY source) ────────────────────────────────────────
+// Uses direct IP connection to bypass ISP SNI blocking (same trick as admin route).
+// Queries the full-text search endpoint: GET /notes?term=<query>
+// Filters to last 3 years automatically.
+const OPENREVIEW_HOST = 'api2.openreview.net'
+const OPENREVIEW_IP   = '34.120.73.14'
+
+interface ORNoteContent {
+  title?:        { value: string }
+  abstract?:     { value: string }
+  keywords?:     { value: string[] }
+  venueid?:      { value: string }
+  'venue id'?:   { value: string }
+  primary_area?: { value: string }
+}
+interface ORNote { id: string; forum: string; content: ORNoteContent }
+
+function openreviewFetch(params: URLSearchParams): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const req = https.get({
+      hostname: OPENREVIEW_IP, port: 443,
+      path: `/notes?${params.toString()}`,
+      headers: {
+        'Host': OPENREVIEW_HOST,
+        'User-Agent': 'ResearchBlog/1.0',
+        'Accept': 'application/json',
+      },
+      rejectUnauthorized: false, servername: '', timeout: 25000,
+    }, (res) => {
+      const chunks: Buffer[] = []
+      res.on('data', (c: Buffer) => chunks.push(c))
+      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+    })
+    req.on('timeout', () => { req.destroy(); reject(new Error('OpenReview timed out')) })
+    req.on('error', reject)
+  })
+}
+
+async function searchOpenReview(query: string, limit = 50): Promise<PaperInput[]> {
+  const params = new URLSearchParams({ term: query, limit: String(limit), offset: '0' })
+  const text = await openreviewFetch(params)
+  const data = JSON.parse(text) as { notes?: ORNote[] }
+  const notes = data.notes ?? []
+
+  const minYear = CURRENT_YEAR - 2   // last 3 years
+
+  return notes
+    .map(note => {
+      const c = note.content
+      const title    = c.title?.value
+      const abstract = c.abstract?.value
+      if (!title || !abstract || abstract.length < 50) return null
+
+      // Extract year from venueid (e.g. "ICLR.cc/2024/Conference" → 2024)
+      const venueStr = c.venueid?.value ?? c['venue id']?.value ?? ''
+      const yearMatch = venueStr.match(/(\d{4})/)
+      const year = yearMatch ? parseInt(yearMatch[1]) : CURRENT_YEAR
+
+      if (year < minYear) return null // skip older than 3 years
+
+      return {
+        id:       note.id,
+        title,
+        abstract,
+        year,
+        keywords: c.keywords?.value ?? [],
+        url:      `https://openreview.net/forum?id=${note.forum || note.id}`,
+      } satisfies PaperInput
+    })
+    .filter((p): p is PaperInput => p !== null)
+}
+
+// ── Semantic Scholar search (secondary, only with API key) ─────────────────────
 async function searchSemanticScholar(query: string, limit = 20): Promise<PaperInput[]> {
   const params = new URLSearchParams({
     query,
     fields: 'title,abstract,year,citationCount,externalIds',
     limit: String(limit),
   })
-  const headers: Record<string, string> = {
-    'User-Agent': 'ResearchBlog/1.0',
-    'Accept': 'application/json',
-    'x-api-key': SS_KEY,
-  }
   const res = await fetch(
     `https://api.semanticscholar.org/graph/v1/paper/search?${params}`,
-    { headers, signal: AbortSignal.timeout(15000) }
+    {
+      headers: { 'User-Agent': 'ResearchBlog/1.0', 'Accept': 'application/json', 'x-api-key': SS_KEY },
+      signal: AbortSignal.timeout(15000),
+    }
   )
   if (!res.ok) throw new Error(`Semantic Scholar ${res.status}: ${(await res.text()).slice(0, 120)}`)
   const data = await res.json() as { data?: Record<string, unknown>[] }
@@ -78,7 +150,7 @@ async function searchSemanticScholar(query: string, limit = 20): Promise<PaperIn
     .map(p => ({
       title:    String(p.title ?? ''),
       abstract: String(p.abstract ?? ''),
-      year:     Number(p.year ?? new Date().getFullYear()),
+      year:     Number(p.year ?? CURRENT_YEAR),
       url:      p.externalIds && (p.externalIds as Record<string, string>).ArXiv
         ? `https://arxiv.org/abs/${(p.externalIds as Record<string, string>).ArXiv}`
         : `https://www.semanticscholar.org/paper/${p.paperId}`,
@@ -86,7 +158,7 @@ async function searchSemanticScholar(query: string, limit = 20): Promise<PaperIn
     }))
 }
 
-// ── arXiv search (direct IP, bypasses ISP SNI blocking) ───────────────────────
+// ── arXiv search (last-resort fallback, direct IP) ────────────────────────────
 const ARXIV_HOST = 'export.arxiv.org'
 const ARXIV_IP   = '199.232.115.42'
 
@@ -128,7 +200,7 @@ async function searchArxiv(query: string, maxResults = 20): Promise<PaperInput[]
       id:       arxivId,
       title:    titleM[1].replace(/\s+/g, ' ').trim(),
       abstract: absM[1].replace(/\s+/g, ' ').trim(),
-      year:     yearM ? parseInt(yearM[1]) : new Date().getFullYear(),
+      year:     yearM ? parseInt(yearM[1]) : CURRENT_YEAR,
       url:      `https://arxiv.org/abs/${arxivId}`,
     })
   }
@@ -141,34 +213,34 @@ async function extractBenchmarks(papers: PaperInput[], topic: string): Promise<B
 
   const papersText = papers
     .slice(0, 20)
-    .map((p, i) =>
-      `[${i + 1}] ${p.title} (${p.year})\nURL: ${p.url}\nABSTRACT: ${p.abstract.slice(0, 700)}`
-    )
+    .map((p, i) => {
+      const kwLine = p.keywords?.length ? `\nKEYWORDS: ${p.keywords.slice(0, 8).join(', ')}` : ''
+      return `[${i + 1}] ${p.title} (${p.year})\nURL: ${p.url}${kwLine}\nABSTRACT: ${p.abstract.slice(0, 700)}`
+    })
     .join('\n\n---\n\n')
 
   const prompt = `You are a research benchmark extractor specializing in "${topic}".
 
-Given these paper abstracts, extract ALL concrete benchmark results reported.
+Given these paper abstracts (and keywords when available), extract ALL concrete benchmark results.
 
 For each result extract:
 - model: proposed model/method name (e.g., "iTransformer", "PatchTST", "GPT-4")
 - dataset: benchmark dataset name (e.g., "ETTh1", "ETTm2", "M4", "ImageNet")
-- metric: evaluation metric (e.g., "MSE", "MAE", "BLEU", "F1", "Accuracy", "RMSE")
+- metric: evaluation metric (e.g., "MSE", "MAE", "BLEU", "F1", "Accuracy")
 - score: exact numeric value (number only)
-- score_label: display string (e.g., "0.386", "95.2%", "32.4")
+- score_label: display string (e.g., "0.386", "95.2%")
 - higher_better: true if higher = better (false for error metrics: MSE, MAE, RMSE, FDE)
 - paper_index: the [N] number of the source paper
 
 Rules:
-- Only extract when a concrete number is given on a named dataset
+- Only extract when a concrete number is stated on a named dataset
 - A paper may contribute MULTIPLE rows (different datasets or metrics)
-- Ignore vague statements like "our method achieves better performance"
+- Ignore vague comparisons — must have an actual number
 
 Papers:
 ${papersText}
 
-Return ONLY valid JSON with key "results":
-{"results": [{"model":"...", "dataset":"...", "metric":"...", "score":0.0, "score_label":"...", "higher_better":true, "paper_index":1}]}`
+Return ONLY valid JSON: {"results": [{"model":"...", "dataset":"...", "metric":"...", "score":0.0, "score_label":"...", "higher_better":true, "paper_index":1}]}`
 
   const resp = await openai.chat.completions.create({
     model: 'gpt-4o-mini',
@@ -192,7 +264,7 @@ Return ONLY valid JSON with key "results":
           scoreLabel:   String(r.score_label ?? r.score),
           metric:       String(r.metric).trim(),
           dataset:      String(r.dataset).trim(),
-          year:         paper?.year ?? new Date().getFullYear(),
+          year:         paper?.year ?? CURRENT_YEAR,
           paperTitle:   paper?.title ?? '',
           paperUrl:     paper?.url ?? '',
           higherBetter: Boolean(r.higher_better),
@@ -226,7 +298,7 @@ async function requireAuth(req: NextRequest) {
   return session
 }
 
-// ── POST — extract from provided papers (OpenReview search results) ────────────
+// ── POST — extract from provided papers (from current discover search results) ──
 export async function POST(req: NextRequest) {
   if (!await requireAuth(req)) return NextResponse.json({ error: 'Auth required' }, { status: 401 })
   const body = await req.json() as { papers: PaperInput[]; topic: string }
@@ -240,42 +312,55 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// ── GET — search query → Semantic Scholar (with key) or arXiv → extract ────────
+// ── GET — pipeline: OpenReview (last 3 yrs) → Semantic Scholar → arXiv ─────────
 export async function GET(req: NextRequest) {
   if (!await requireAuth(req)) return NextResponse.json({ error: 'Auth required' }, { status: 401 })
   const q = new URL(req.url).searchParams.get('q')?.trim() ?? ''
   if (!q) return NextResponse.json({ error: 'Query required' }, { status: 400 })
 
-  // Return cached result if available
   const cacheKey = `leaderboard:${q.toLowerCase()}`
   const cached = getCached(cacheKey)
   if (cached) return NextResponse.json({ ...(cached as object), cached: true })
 
   let papers: PaperInput[] = []
-  let source = 'arxiv'
+  let source = 'openreview'
 
-  // Use Semantic Scholar only when API key is configured (avoids 429 rate limits)
-  if (SS_KEY) {
+  // 1. OpenReview (primary): full-text search, latest 3 years, rich structured data
+  try {
+    papers = await searchOpenReview(q, 50)
+    console.log(`[Leaderboard] OpenReview: ${papers.length} papers for "${q}"`)
+  } catch (err) {
+    console.warn('[Leaderboard] OpenReview failed:', (err as Error).message)
+  }
+
+  // 2. Semantic Scholar (secondary, only with API key)
+  if (papers.length < 5 && SS_KEY) {
     try {
-      papers = await searchSemanticScholar(q, 20)
-      source = 'semantic_scholar'
+      const ssPapers = await searchSemanticScholar(q, 20)
+      papers = [...papers, ...ssPapers]
+      source = papers.length > 0 ? 'openreview+semantic_scholar' : 'semantic_scholar'
+      console.log(`[Leaderboard] +Semantic Scholar: ${ssPapers.length} papers`)
     } catch (err) {
-      console.warn('Semantic Scholar failed:', (err as Error).message)
+      console.warn('[Leaderboard] Semantic Scholar failed:', (err as Error).message)
     }
   }
 
-  // arXiv as primary (no key) or fallback
-  if (papers.length === 0) {
+  // 3. arXiv fallback (last resort)
+  if (papers.length < 5) {
     source = 'arxiv'
     try {
-      papers = await searchArxiv(q, 20)
+      const axPapers = await searchArxiv(q, 25)
+      papers = [...papers, ...axPapers]
+      console.log(`[Leaderboard] +arXiv: ${axPapers.length} papers`)
     } catch (err) {
-      return NextResponse.json({ error: `arXiv search failed: ${(err as Error).message}` }, { status: 502 })
+      if (papers.length === 0) {
+        return NextResponse.json({ error: `All sources failed: ${(err as Error).message}` }, { status: 502 })
+      }
     }
   }
 
   if (papers.length === 0) {
-    return NextResponse.json({ tables: [], extracted: 0, papers: 0, source, message: 'No papers found on arXiv or Semantic Scholar' })
+    return NextResponse.json({ tables: [], extracted: 0, papers: 0, source, message: 'No papers found' })
   }
 
   const rows   = await extractBenchmarks(papers, q)
