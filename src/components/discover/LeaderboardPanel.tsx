@@ -35,14 +35,15 @@ const METRIC_COLOR_MAP: Record<string, string> = {
 const metricColor = (m: string) => METRIC_COLOR_MAP[m.toLowerCase()] ?? 'text-blue-400'
 
 export function LeaderboardPanel({ currentPapers = [], initialQuery = '' }: Props) {
-  const [mode, setMode]       = useState<'current' | 'search'>(currentPapers.length > 0 ? 'current' : 'search')
-  const [query, setQuery]     = useState(initialQuery)
-  const [loading, setLoading] = useState(false)
-  const [tables, setTables]   = useState<BenchmarkTable[]>([])
-  const [meta, setMeta]       = useState<{ papers: number; extracted: number; source: string; query?: string } | null>(null)
-  const [error, setError]     = useState('')
+  const [mode, setMode]         = useState<'current' | 'search'>(currentPapers.length > 0 ? 'current' : 'search')
+  const [query, setQuery]       = useState(initialQuery)
+  const [loading, setLoading]   = useState(false)
+  const [tables, setTables]     = useState<BenchmarkTable[]>([])
+  const [meta, setMeta]         = useState<{ papers: number; extracted: number; source: string; query?: string } | null>(null)
+  const [error, setError]       = useState('')
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
-  const [ran, setRan]         = useState(false)
+  const [ran, setRan]           = useState(false)
+  const [noResults, setNoResults] = useState(false)  // OpenReview found 0 papers — offer arXiv
 
   // Switch mode when papers change
   useEffect(() => {
@@ -80,16 +81,19 @@ export function LeaderboardPanel({ currentPapers = [], initialQuery = '' }: Prop
     }
   }, [currentPapers, query, initialQuery])
 
-  // Search and extract via Semantic Scholar / arXiv
-  const searchAndExtract = useCallback(async (q = query) => {
+  // Search OpenReview (default) or arXiv (when user explicitly requests)
+  const searchAndExtract = useCallback(async (q = query, source = 'openreview') => {
     if (!q.trim()) return
-    setLoading(true); setError(''); setTables([]); setMeta(null); setRan(true)
+    setLoading(true); setError(''); setTables([]); setMeta(null); setRan(true); setNoResults(false)
     try {
-      const res = await fetch(`/api/discover/leaderboard?q=${encodeURIComponent(q.trim())}`)
+      const params = new URLSearchParams({ q: q.trim(), source })
+      const res  = await fetch(`/api/discover/leaderboard?${params}`)
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'Search failed')
       setTables(data.tables ?? [])
       setMeta({ papers: data.papers, extracted: data.extracted, source: data.source, query: data.query })
+      // Backend signals no OpenReview results so we can offer arXiv
+      if (data.noResults) setNoResults(true)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed')
     } finally {
@@ -167,7 +171,7 @@ export function LeaderboardPanel({ currentPapers = [], initialQuery = '' }: Prop
         ) : (
           <div className="space-y-2">
             <p className="text-xs text-white/40">
-              Search Semantic Scholar for recent papers and extract benchmark data using AI.
+              Search <span className="text-white/60">OpenReview</span> (last 3 years) for papers and extract benchmark data using AI.
             </p>
             <div className="flex gap-2">
               <div className="relative flex-1">
@@ -210,12 +214,12 @@ export function LeaderboardPanel({ currentPapers = [], initialQuery = '' }: Prop
               <Loader2 className="h-5 w-5 animate-spin text-blue-400 flex-shrink-0" />
               <div>
                 <p className="text-white/60 font-medium text-sm">
-                  {mode === 'current' ? 'Extracting benchmarks from papers…' : 'Searching & analyzing papers…'}
+                  {mode === 'current' ? 'Extracting benchmarks from papers…' : 'Searching OpenReview & analyzing…'}
                 </p>
                 <p className="text-xs mt-0.5 text-white/30">
                   {mode === 'current'
                     ? 'Using AI to find model names, datasets & scores'
-                    : 'Fetching from Semantic Scholar → extracting with AI · ~15s'}
+                    : 'OpenReview full-text search → semantic re-rank → AI extraction · ~15s'}
                 </p>
               </div>
             </div>
@@ -262,14 +266,29 @@ export function LeaderboardPanel({ currentPapers = [], initialQuery = '' }: Prop
             <div className="inline-flex h-12 w-12 items-center justify-center rounded-full bg-white/5 mb-3">
               <BarChart2 className="h-5 w-5 text-white/20" />
             </div>
-            <p className="text-sm text-white/50 font-medium">No benchmark tables found</p>
-            <p className="text-xs text-white/30 mt-1.5 max-w-xs mx-auto">
-              The papers analyzed didn't report concrete numeric scores on named datasets.
-              {mode === 'current'
-                ? ' Try running a more specific search first (e.g. add a Research Task filter).'
-                : ' Try a more specific task name like "time series forecasting ETTh1".'}
+            <p className="text-sm text-white/50 font-medium">
+              {noResults ? 'No papers found on OpenReview' : 'No benchmark tables found'}
             </p>
-            {mode === 'current' && (
+            <p className="text-xs text-white/30 mt-1.5 max-w-xs mx-auto">
+              {noResults
+                ? 'OpenReview didn\'t return papers for this query. You can try searching arXiv for preprints instead.'
+                : mode === 'current'
+                ? 'Papers analyzed didn\'t report concrete numeric scores. Try a more specific search.'
+                : 'Papers found didn\'t include concrete benchmark scores. Try a more specific query.'}
+            </p>
+
+            {/* arXiv fallback button — only shown when OpenReview had 0 results */}
+            {noResults && mode === 'search' && (
+              <button
+                onClick={() => searchAndExtract(query, 'arxiv')}
+                className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-orange-500/15 border border-orange-500/30 text-orange-300 text-xs font-medium hover:bg-orange-500/20 hover:border-orange-400/40 transition-colors"
+              >
+                <Search className="h-3.5 w-3.5" />
+                Search arXiv instead
+              </button>
+            )}
+
+            {!noResults && mode === 'current' && (
               <button onClick={() => setMode('search')}
                 className="mt-3 text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 mx-auto">
                 <Search className="h-3 w-3" /> Switch to topic search

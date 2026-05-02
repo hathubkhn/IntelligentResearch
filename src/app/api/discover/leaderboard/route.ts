@@ -7,7 +7,6 @@ import https from 'https'
 export const maxDuration = 60
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
-const SS_KEY = process.env.SEMANTIC_SCHOLAR_API_KEY ?? ''
 const CURRENT_YEAR = new Date().getFullYear()
 
 // ── In-memory cache (1 hour TTL) ───────────────────────────────────────────────
@@ -167,35 +166,6 @@ async function searchOpenReview(query: string, limit = 100): Promise<PaperInput[
     .filter((p): p is PaperInput => p !== null)
 }
 
-// ── Semantic Scholar search (secondary, only with API key) ─────────────────────
-async function searchSemanticScholar(query: string, limit = 20): Promise<PaperInput[]> {
-  const params = new URLSearchParams({
-    query,
-    fields: 'title,abstract,year,citationCount,externalIds',
-    limit: String(limit),
-  })
-  const res = await fetch(
-    `https://api.semanticscholar.org/graph/v1/paper/search?${params}`,
-    {
-      headers: { 'User-Agent': 'ResearchBlog/1.0', 'Accept': 'application/json', 'x-api-key': SS_KEY },
-      signal: AbortSignal.timeout(15000),
-    }
-  )
-  if (!res.ok) throw new Error(`Semantic Scholar ${res.status}: ${(await res.text()).slice(0, 120)}`)
-  const data = await res.json() as { data?: Record<string, unknown>[] }
-  return (data.data ?? [])
-    .filter(p => p.abstract)
-    .map(p => ({
-      title:    String(p.title ?? ''),
-      abstract: String(p.abstract ?? ''),
-      year:     Number(p.year ?? CURRENT_YEAR),
-      url:      p.externalIds && (p.externalIds as Record<string, string>).ArXiv
-        ? `https://arxiv.org/abs/${(p.externalIds as Record<string, string>).ArXiv}`
-        : `https://www.semanticscholar.org/paper/${p.paperId}`,
-      id:       String(p.paperId ?? ''),
-    }))
-}
-
 // ── arXiv search (normal HTTPS — direct IP breaks Fastly CDN) ────────────────
 const ARXIV_HOST = 'export.arxiv.org'
 async function searchArxiv(query: string, maxResults = 20): Promise<PaperInput[]> {
@@ -353,64 +323,54 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// ── GET — pipeline: OpenReview (last 3 yrs) → Semantic Scholar → arXiv ─────────
+// ── GET — OpenReview first (same /notes/search API as discover). If no results,
+//         the UI shows a "Search arXiv" button — arXiv only runs when source=arxiv. ──
 export async function GET(req: NextRequest) {
   if (!await requireAuth(req)) return NextResponse.json({ error: 'Auth required' }, { status: 401 })
-  const q = new URL(req.url).searchParams.get('q')?.trim() ?? ''
+  const sp = new URL(req.url).searchParams
+  const q  = sp.get('q')?.trim() ?? ''
   if (!q) return NextResponse.json({ error: 'Query required' }, { status: 400 })
 
-  const cacheKey = `leaderboard:${q.toLowerCase()}`
+  const forceSource = sp.get('source') ?? 'openreview'  // 'openreview' | 'arxiv'
+
+  // --- arXiv path (user explicitly requested) ---------------------------------
+  if (forceSource === 'arxiv') {
+    try {
+      const candidates = await searchArxiv(q, 40)
+      console.log(`[Leaderboard] arXiv: ${candidates.length} candidates for "${q}"`)
+      if (candidates.length === 0) {
+        return NextResponse.json({ tables: [], extracted: 0, papers: 0, source: 'arxiv', message: 'No papers found on arXiv' })
+      }
+      const ranked = await semanticRank(q, candidates, 20)
+      const rows   = await extractBenchmarks(ranked, q)
+      const tables = buildTables(rows)
+      return NextResponse.json({ tables, extracted: rows.length, papers: ranked.length, source: 'arxiv', query: q })
+    } catch (err) {
+      return NextResponse.json({ error: `arXiv search failed: ${(err as Error).message}` }, { status: 502 })
+    }
+  }
+
+  // --- OpenReview path (default) ----------------------------------------------
+  const cacheKey = `leaderboard:or:${q.toLowerCase()}`
   const cached = getCached(cacheKey)
   if (cached) return NextResponse.json({ ...(cached as object), cached: true })
 
-  let papers: PaperInput[] = []
-  let source = 'openreview'
-
-  // 1. OpenReview (primary): full-text search, latest 3 years, rich structured data
   try {
     const candidates = await searchOpenReview(q, 100)
-    // Semantic re-rank: use embeddings to keep papers most relevant to the query by meaning
-    papers = await semanticRank(q, candidates, 20)
-    console.log(`[Leaderboard] OpenReview: ${candidates.length} candidates → ${papers.length} after semantic re-rank`)
+    console.log(`[Leaderboard] OpenReview: ${candidates.length} candidates for "${q}"`)
+
+    if (candidates.length === 0) {
+      // Signal to the UI that OpenReview found nothing so it can offer arXiv fallback
+      return NextResponse.json({ tables: [], extracted: 0, papers: 0, source: 'openreview', noResults: true, query: q })
+    }
+
+    const ranked = await semanticRank(q, candidates, 20)
+    const rows   = await extractBenchmarks(ranked, q)
+    const tables = buildTables(rows)
+    const result = { tables, extracted: rows.length, papers: ranked.length, source: 'openreview', query: q }
+    setCached(cacheKey, result)
+    return NextResponse.json(result)
   } catch (err) {
-    console.warn('[Leaderboard] OpenReview failed:', (err as Error).message)
+    return NextResponse.json({ error: `OpenReview search failed: ${(err as Error).message}` }, { status: 502 })
   }
-
-  // 2. Semantic Scholar (secondary, only with API key)
-  if (papers.length < 5 && SS_KEY) {
-    try {
-      const ssCandidates = await searchSemanticScholar(q, 40)
-      const ssRanked = await semanticRank(q, ssCandidates, 15)
-      papers = [...papers, ...ssRanked]
-      source = papers.length > 0 ? 'openreview+semantic_scholar' : 'semantic_scholar'
-      console.log(`[Leaderboard] +Semantic Scholar: ${ssRanked.length} papers after re-rank`)
-    } catch (err) {
-      console.warn('[Leaderboard] Semantic Scholar failed:', (err as Error).message)
-    }
-  }
-
-  // 3. arXiv fallback (last resort)
-  if (papers.length < 5) {
-    source = 'arxiv'
-    try {
-      const axCandidates = await searchArxiv(q, 40)
-      const axRanked = await semanticRank(q, axCandidates, 15)
-      papers = [...papers, ...axRanked]
-      console.log(`[Leaderboard] +arXiv: ${axRanked.length} papers after re-rank`)
-    } catch (err) {
-      if (papers.length === 0) {
-        return NextResponse.json({ error: `All sources failed: ${(err as Error).message}` }, { status: 502 })
-      }
-    }
-  }
-
-  if (papers.length === 0) {
-    return NextResponse.json({ tables: [], extracted: 0, papers: 0, source, message: 'No papers found' })
-  }
-
-  const rows   = await extractBenchmarks(papers, q)
-  const tables = buildTables(rows)
-  const result = { tables, extracted: rows.length, papers: papers.length, source, query: q }
-  setCached(cacheKey, result)
-  return NextResponse.json(result)
 }
