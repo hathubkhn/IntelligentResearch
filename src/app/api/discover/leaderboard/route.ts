@@ -323,54 +323,74 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// ── GET — OpenReview first (same /notes/search API as discover). If no results,
-//         the UI shows a "Search arXiv" button — arXiv only runs when source=arxiv. ──
+// ── GET — SSE streaming, 3 visible steps: Search → Re-rank → Extract/Build ──────
 export async function GET(req: NextRequest) {
   if (!await requireAuth(req)) return NextResponse.json({ error: 'Auth required' }, { status: 401 })
-  const sp = new URL(req.url).searchParams
-  const q  = sp.get('q')?.trim() ?? ''
-  if (!q) return NextResponse.json({ error: 'Query required' }, { status: 400 })
+  const sp  = new URL(req.url).searchParams
+  const q   = sp.get('q')?.trim() ?? ''
+  if (!q)   return NextResponse.json({ error: 'Query required' }, { status: 400 })
 
-  const forceSource = sp.get('source') ?? 'openreview'  // 'openreview' | 'arxiv'
+  const source = sp.get('source') ?? 'openreview'   // 'openreview' | 'arxiv'
 
-  // --- arXiv path (user explicitly requested) ---------------------------------
-  if (forceSource === 'arxiv') {
-    try {
-      const candidates = await searchArxiv(q, 40)
-      console.log(`[Leaderboard] arXiv: ${candidates.length} candidates for "${q}"`)
-      if (candidates.length === 0) {
-        return NextResponse.json({ tables: [], extracted: 0, papers: 0, source: 'arxiv', message: 'No papers found on arXiv' })
+  const encoder = new TextEncoder()
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (data: object) => {
+        try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`)) } catch { /* closed */ }
       }
-      const ranked = await semanticRank(q, candidates, 20)
-      const rows   = await extractBenchmarks(ranked, q)
-      const tables = buildTables(rows)
-      return NextResponse.json({ tables, extracted: rows.length, papers: ranked.length, source: 'arxiv', query: q })
-    } catch (err) {
-      return NextResponse.json({ error: `arXiv search failed: ${(err as Error).message}` }, { status: 502 })
-    }
-  }
 
-  // --- OpenReview path (default) ----------------------------------------------
-  const cacheKey = `leaderboard:or:${q.toLowerCase()}`
-  const cached = getCached(cacheKey)
-  if (cached) return NextResponse.json({ ...(cached as object), cached: true })
+      try {
+        // ── Step 1: search ──────────────────────────────────────────────────────
+        send({ step: 1, status: 'searching', source,
+          message: source === 'arxiv' ? 'Searching arXiv for recent papers…' : 'Searching OpenReview (last 3 years)…' })
 
-  try {
-    const candidates = await searchOpenReview(q, 100)
-    console.log(`[Leaderboard] OpenReview: ${candidates.length} candidates for "${q}"`)
+        let candidates: PaperInput[] = []
+        if (source === 'arxiv') {
+          candidates = await searchArxiv(q, 40)
+        } else {
+          candidates = await searchOpenReview(q, 100)
+        }
 
-    if (candidates.length === 0) {
-      // Signal to the UI that OpenReview found nothing so it can offer arXiv fallback
-      return NextResponse.json({ tables: [], extracted: 0, papers: 0, source: 'openreview', noResults: true, query: q })
-    }
+        if (candidates.length === 0) {
+          send({ step: 1, status: 'no_results', source,
+            message: source === 'arxiv'
+              ? 'No papers found on arXiv for this query.'
+              : 'No papers found on OpenReview. Try searching arXiv instead.' })
+          controller.close()
+          return
+        }
 
-    const ranked = await semanticRank(q, candidates, 20)
-    const rows   = await extractBenchmarks(ranked, q)
-    const tables = buildTables(rows)
-    const result = { tables, extracted: rows.length, papers: ranked.length, source: 'openreview', query: q }
-    setCached(cacheKey, result)
-    return NextResponse.json(result)
-  } catch (err) {
-    return NextResponse.json({ error: `OpenReview search failed: ${(err as Error).message}` }, { status: 502 })
-  }
+        send({ step: 1, status: 'done', source, papers: candidates, count: candidates.length })
+
+        // ── Step 2: semantic re-rank ─────────────────────────────────────────────
+        send({ step: 2, status: 'ranking',
+          message: `Ranking ${candidates.length} papers by semantic similarity to "${q}"…` })
+
+        const ranked = await semanticRank(q, candidates, 20)
+        send({ step: 2, status: 'done', papers: ranked, count: ranked.length,
+          message: `Top ${ranked.length} most relevant papers selected` })
+
+        // ── Step 3: benchmark extraction ─────────────────────────────────────────
+        send({ step: 3, status: 'extracting',
+          message: `Scanning ${ranked.length} papers for benchmark scores…` })
+
+        const rows   = await extractBenchmarks(ranked, q)
+        const tables = buildTables(rows)
+        send({ step: 3, status: 'done', tables, extracted: rows.length, papers: ranked.length })
+
+      } catch (err) {
+        send({ status: 'error', message: (err as Error).message })
+      }
+
+      controller.close()
+    },
+  })
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type':  'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection':    'keep-alive',
+    },
+  })
 }
