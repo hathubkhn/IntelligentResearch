@@ -71,6 +71,7 @@ export function LeaderboardPanel({ currentPapers = [], initialQuery = '' }: Prop
   const [globalError, setGlobalError] = useState('')
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [papersOpen, setPapersOpen] = useState(false)
+  const [rankedOpen, setRankedOpen] = useState(false)
 
   useEffect(() => {
     setMode(currentPapers.length > 0 ? 'current' : 'search')
@@ -189,6 +190,39 @@ export function LeaderboardPanel({ currentPapers = [], initialQuery = '' }: Prop
 
   const toggleCollapse = (key: string) =>
     setCollapsed(s => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n })
+
+  // Shared expandable paper list used in both Step 1 and Step 2
+  const PaperList = ({ papers }: { papers: PaperInput[] }) => (
+    <div className="border-t border-white/8 divide-y divide-white/5 max-h-64 overflow-y-auto">
+      {papers.map((p, i) => (
+        <div key={p.id ?? i} className="px-4 py-2.5 flex items-start gap-2 hover:bg-white/[0.02] transition-colors">
+          <span className="text-[10px] text-white/20 font-mono w-4 flex-shrink-0 mt-0.5">{i + 1}</span>
+          <div className="flex-1 min-w-0">
+            <a href={p.url} target="_blank" rel="noopener noreferrer"
+              className="text-xs text-white/70 hover:text-white line-clamp-2 transition-colors leading-snug">
+              {p.title}
+            </a>
+            <div className="flex items-center flex-wrap gap-1.5 mt-1">
+              {p.venue && (
+                <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/15 border border-blue-500/20 text-blue-300 font-medium">
+                  {p.venue}
+                </span>
+              )}
+              {p.year && <span className="text-[10px] text-white/30">{p.year}</span>}
+              {p.keywords?.slice(0, 3).map(k => (
+                <span key={k} className="text-[9px] px-1.5 py-0.5 rounded bg-white/5 text-white/25">{k}</span>
+              ))}
+            </div>
+          </div>
+          {p.pdfUrl && (
+            <a href={p.pdfUrl} target="_blank" rel="noopener noreferrer"
+              className="text-[9px] text-white/20 hover:text-orange-300 flex-shrink-0 mt-0.5 transition-colors"
+              title="View PDF">PDF</a>
+          )}
+        </div>
+      ))}
+    </div>
+  )
 
   const step1 = steps[0], step2 = steps[1], step3 = steps[2]
   const tables = step3.tables ?? []
@@ -340,31 +374,13 @@ export function LeaderboardPanel({ currentPapers = [], initialQuery = '' }: Prop
 
               {/* Expandable paper list */}
               {step1.status === 'done' && papersOpen && step1.papers && (
-                <div className="border-t border-white/8 divide-y divide-white/5 max-h-64 overflow-y-auto">
-                  {step1.papers.map((p, i) => (
-                    <div key={p.id ?? i} className="px-4 py-2 flex items-start gap-2 hover:bg-white/[0.02] transition-colors">
-                      <span className="text-[10px] text-white/20 font-mono w-4 flex-shrink-0 mt-0.5">{i + 1}</span>
-                      <div className="flex-1 min-w-0">
-                        <a href={p.url} target="_blank" rel="noopener noreferrer"
-                          className="text-xs text-white/70 hover:text-white line-clamp-1 transition-colors">
-                          {p.title}
-                        </a>
-                        <div className="flex items-center gap-1.5 mt-0.5">
-                          <span className="text-[10px] text-white/25">{p.year}</span>
-                          {p.keywords?.slice(0, 3).map(k => (
-                            <span key={k} className="text-[9px] px-1.5 py-0.5 rounded bg-white/5 text-white/25">{k}</span>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                <PaperList papers={step1.papers} />
               )}
             </div>
 
             {/* ── Step 2: Semantic Re-rank ── */}
             {(step2.status !== 'pending' || step1.status === 'done') && (
-              <div className={`rounded-xl border transition-colors ${
+              <div className={`rounded-xl border transition-colors overflow-hidden ${
                 step2.status === 'done'    ? 'border-emerald-500/20 bg-emerald-500/[0.03]'
                 : step2.status === 'running' ? 'border-blue-500/20 bg-blue-500/[0.03]'
                 : step2.status === 'error'   ? 'border-red-500/20 bg-red-500/[0.03]'
@@ -382,10 +398,17 @@ export function LeaderboardPanel({ currentPapers = [], initialQuery = '' }: Prop
                       {step2.message ?? (step2.status === 'pending' ? 'Waiting for search…' : '')}
                     </p>
                   </div>
-                  {step2.status === 'done' && step2.count !== undefined && (
-                    <span className="text-[10px] text-emerald-400/60 flex-shrink-0">{step2.count} selected</span>
+                  {step2.status === 'done' && step2.papers && step2.papers.length > 0 && (
+                    <button onClick={() => setRankedOpen(o => !o)}
+                      className="flex items-center gap-1 text-[10px] text-white/35 hover:text-white/60 transition-colors flex-shrink-0">
+                      {rankedOpen ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                      {step2.papers.length} ranked
+                    </button>
                   )}
                 </div>
+                {step2.status === 'done' && rankedOpen && step2.papers && (
+                  <PaperList papers={step2.papers} />
+                )}
               </div>
             )}
 
@@ -406,7 +429,7 @@ export function LeaderboardPanel({ currentPapers = [], initialQuery = '' }: Prop
                       <span className="text-xs font-semibold text-white/70">Benchmark Leaderboard</span>
                     </div>
                     <p className="text-[11px] text-white/40 mt-0.5 truncate">
-                      {step3.status === 'running' ? (step3.message ?? 'Extracting benchmark scores with AI…')
+                      {step3.status === 'running' ? (step3.message ?? 'Downloading papers & extracting benchmark scores with AI…')
                         : step3.status === 'done'
                         ? `${step3.extracted ?? 0} entries · ${tables.length} leaderboard tables`
                         : step3.status === 'pending' ? 'Waiting for ranking…' : ''}

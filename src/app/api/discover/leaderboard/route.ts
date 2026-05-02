@@ -3,38 +3,24 @@ import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 import OpenAI from 'openai'
 import https from 'https'
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const pdfParse = require('pdf-parse')
 
 export const maxDuration = 60
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 const CURRENT_YEAR = new Date().getFullYear()
 
-// ── In-memory cache (1 hour TTL) ───────────────────────────────────────────────
-const cache = new Map<string, { data: unknown; ts: number }>()
-const CACHE_TTL_MS = 60 * 60 * 1000
-
-function getCached(key: string) {
-  const entry = cache.get(key)
-  if (entry && Date.now() - entry.ts < CACHE_TTL_MS) return entry.data
-  cache.delete(key)
-  return null
-}
-function setCached(key: string, data: unknown) {
-  cache.set(key, { data, ts: Date.now() })
-  if (cache.size > 50) {
-    const oldest = [...cache.entries()].sort((a, b) => a[1].ts - b[1].ts)[0]
-    cache.delete(oldest[0])
-  }
-}
-
 // ── Types ──────────────────────────────────────────────────────────────────────
 export interface PaperInput {
-  title:    string
-  abstract: string
-  year:     number
-  url:      string
-  id?:      string
+  title:     string
+  abstract:  string
+  year:      number
+  url:       string
+  id?:       string
   keywords?: string[]
+  venue?:    string    // conference name, e.g. "ICLR", "NeurIPS"
+  pdfUrl?:   string    // direct PDF link
 }
 
 export interface BenchmarkRow {
@@ -56,39 +42,55 @@ export interface BenchmarkTable {
   rows:         BenchmarkRow[]
 }
 
-// ── Semantic re-ranking (query + paper embeddings → cosine similarity) ────────
-// Runs in a single batched OpenAI embedding call. Very cheap (~$0.0002 per search).
+// ── Venue name extraction ──────────────────────────────────────────────────────
+function extractVenueName(venueid: string): string {
+  if (!venueid) return ''
+  // "ICLR.cc/2024/Conference" → "ICLR"
+  // "NeurIPS.cc/2024/Workshop/TSALM" → "NeurIPS Workshop"
+  const ccMatch = venueid.match(/^([^.]+)\.cc\/\d+\/(\w+)/)
+  if (ccMatch) {
+    const conf = ccMatch[1].toUpperCase()
+    return venueid.toLowerCase().includes('workshop') ? `${conf} Workshop` : conf
+  }
+  // "auai.org/UAI/2024/Conference" → "UAI"
+  const orgMatch = venueid.match(/\/([A-Z]{2,})\/\d+\//)
+  if (orgMatch) return orgMatch[1]
+  // "TMLR" plain
+  if (/^[A-Z]+$/.test(venueid.trim())) return venueid.trim()
+  return venueid.split(/[./]/)[0].toUpperCase()
+}
+
+// ── In-memory cache (1 hour TTL) ───────────────────────────────────────────────
+const cache = new Map<string, { data: unknown; ts: number }>()
+const CACHE_TTL_MS = 60 * 60 * 1000
+function getCached(key: string) {
+  const e = cache.get(key); if (e && Date.now() - e.ts < CACHE_TTL_MS) return e.data; cache.delete(key); return null
+}
+function setCached(key: string, data: unknown) {
+  cache.set(key, { data, ts: Date.now() })
+  if (cache.size > 50) { const o = [...cache.entries()].sort((a, b) => a[1].ts - b[1].ts)[0]; cache.delete(o[0]) }
+}
+
+// ── Semantic re-ranking ────────────────────────────────────────────────────────
 async function semanticRank(query: string, papers: PaperInput[], topK = 20): Promise<PaperInput[]> {
   if (papers.length <= topK) return papers
   try {
-    const texts = [
-      query,
-      ...papers.map(p => `${p.title}\n${(p.keywords ?? []).join(', ')}\n${p.abstract}`.slice(0, 2000)),
-    ]
+    const texts = [query, ...papers.map(p => `${p.title}\n${(p.keywords ?? []).join(', ')}\n${p.abstract}`.slice(0, 2000))]
     const resp = await openai.embeddings.create({ model: 'text-embedding-3-small', input: texts })
     const embs = resp.data.map(d => d.embedding)
     const qEmb = embs[0]
-
-    function cos(a: number[], b: number[]) {
+    const cos = (a: number[], b: number[]) => {
       let dot = 0, na = 0, nb = 0
       for (let i = 0; i < a.length; i++) { dot += a[i]*b[i]; na += a[i]*a[i]; nb += b[i]*b[i] }
       return dot / (Math.sqrt(na) * Math.sqrt(nb))
     }
-
-    return papers
-      .map((p, i) => ({ p, score: cos(qEmb, embs[i + 1]) }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, topK)
-      .map(x => x.p)
-  } catch (err) {
-    console.warn('[Leaderboard] Semantic re-rank failed, using original order:', (err as Error).message)
+    return papers.map((p, i) => ({ p, s: cos(qEmb, embs[i+1]) })).sort((a, b) => b.s - a.s).slice(0, topK).map(x => x.p)
+  } catch {
     return papers.slice(0, topK)
   }
 }
 
-// ── OpenReview search (PRIMARY source) ────────────────────────────────────────
-// Stage 1: broad full-text fetch (term=) — casts a wide net of candidates.
-// Stage 2: semantic re-ranking (embeddings) — keeps top-K by meaning, not keywords.
+// ── OpenReview search ──────────────────────────────────────────────────────────
 const OPENREVIEW_HOST = 'api2.openreview.net'
 const OPENREVIEW_IP   = '34.120.73.14'
 
@@ -99,6 +101,7 @@ interface ORNoteContent {
   venueid?:      { value: string }
   'venue id'?:   { value: string }
   primary_area?: { value: string }
+  pdf?:          { value: string }
 }
 interface ORNote { id: string; forum: string; content: ORNoteContent }
 
@@ -106,12 +109,8 @@ function openreviewFetch(params: URLSearchParams): Promise<string> {
   return new Promise((resolve, reject) => {
     const req = https.get({
       hostname: OPENREVIEW_IP, port: 443,
-      path: `/notes/search?${params.toString()}`,  // /notes/search supports term= free-text search
-      headers: {
-        'Host': OPENREVIEW_HOST,
-        'User-Agent': 'ResearchBlog/1.0',
-        'Accept': 'application/json',
-      },
+      path: `/notes/search?${params.toString()}`,
+      headers: { 'Host': OPENREVIEW_HOST, 'User-Agent': 'ResearchBlog/1.0', 'Accept': 'application/json' },
       rejectUnauthorized: false, servername: '', timeout: 25000,
     }, (res) => {
       const chunks: Buffer[] = []
@@ -124,61 +123,47 @@ function openreviewFetch(params: URLSearchParams): Promise<string> {
 }
 
 async function searchOpenReview(query: string, limit = 100): Promise<PaperInput[]> {
-  const params = new URLSearchParams({
-    term: query,
-    source: 'forum',   // forum = top-level paper submissions, not reviews/replies
-    limit: String(limit),
-    offset: '0',
-  })
+  const params = new URLSearchParams({ term: query, source: 'forum', limit: String(limit), offset: '0' })
   const text = await openreviewFetch(params)
   const data = JSON.parse(text) as { notes?: ORNote[] }
-  const notes = data.notes ?? []
-
-  const minYear = CURRENT_YEAR - 2   // last 3 years
-
-  return notes
+  const minYear = CURRENT_YEAR - 2
+  return (data.notes ?? [])
     .map(note => {
       const c = note.content
       const title    = c.title?.value
       const abstract = c.abstract?.value
       if (!title || !abstract || abstract.length < 50) return null
-
-      // Extract year from venueid (e.g. "ICLR.cc/2024/Conference" → 2024)
       const venueStr = c.venueid?.value ?? c['venue id']?.value ?? ''
-
-      // Skip rejected submissions
       if (venueStr.toLowerCase().includes('rejected')) return null
-
       const yearMatch = venueStr.match(/(\d{4})/)
       const year = yearMatch ? parseInt(yearMatch[1]) : CURRENT_YEAR
-
-      if (year < minYear) return null // skip older than 3 years
-
+      if (year < minYear) return null
+      const pdfVal = c.pdf?.value ?? ''
+      const pdfUrl = pdfVal.startsWith('/') ? `https://openreview.net${pdfVal}` : (pdfVal || `https://openreview.net/pdf?id=${note.id}`)
       return {
         id:       note.id,
         title,
         abstract,
         year,
+        venue:    extractVenueName(venueStr),
         keywords: c.keywords?.value ?? [],
         url:      `https://openreview.net/forum?id=${note.forum || note.id}`,
+        pdfUrl,
       } satisfies PaperInput
     })
     .filter((p): p is PaperInput => p !== null)
 }
 
-// ── arXiv search (normal HTTPS — direct IP breaks Fastly CDN) ────────────────
+// ── arXiv search ───────────────────────────────────────────────────────────────
 const ARXIV_HOST = 'export.arxiv.org'
+
 async function searchArxiv(query: string, maxResults = 20): Promise<PaperInput[]> {
-  // Wrap multi-word query in quotes for exact phrase matching
   const phrase = query.includes(' ') ? `"${query}"` : query
-  const searchQuery = `ti:${phrase} OR abs:${phrase}`
   const params = new URLSearchParams({
-    search_query: searchQuery,
-    sortBy: 'submittedDate',
-    sortOrder: 'descending',
+    search_query: `ti:${phrase} OR abs:${phrase}`,
+    sortBy: 'submittedDate', sortOrder: 'descending',
     max_results: String(maxResults),
   })
-
   return new Promise((resolve, reject) => {
     const req = https.get({
       hostname: ARXIV_HOST, port: 443,
@@ -189,7 +174,7 @@ async function searchArxiv(query: string, maxResults = 20): Promise<PaperInput[]
       const chunks: Buffer[] = []
       res.on('data', (c: Buffer) => chunks.push(c))
       res.on('end', () => {
-        const text = Buffer.concat(chunks).toString('utf8')
+        const text   = Buffer.concat(chunks).toString('utf8')
         const papers: PaperInput[] = []
         for (const m of text.matchAll(/<entry>([\s\S]*?)<\/entry>/g)) {
           const block = m[1]
@@ -197,14 +182,16 @@ async function searchArxiv(query: string, maxResults = 20): Promise<PaperInput[]
           const titleM = block.match(/<title[^>]*>([\s\S]*?)<\/title>/)
           const absM   = block.match(/<summary[^>]*>([\s\S]*?)<\/summary>/)
           const yearM  = block.match(/<published>(\d{4})/)
-          if (!idM || !titleM || !absM) return
+          if (!idM || !titleM || !absM) continue
           const arxivId = idM[1].replace(/v\d+$/, '')
           papers.push({
-            id:       arxivId,
-            title:    titleM[1].replace(/\s+/g, ' ').trim(),
+            id:      arxivId,
+            title:   titleM[1].replace(/\s+/g, ' ').trim(),
             abstract: absM[1].replace(/\s+/g, ' ').trim(),
-            year:     yearM ? parseInt(yearM[1]) : CURRENT_YEAR,
-            url:      `https://arxiv.org/abs/${arxivId}`,
+            year:    yearM ? parseInt(yearM[1]) : CURRENT_YEAR,
+            url:     `https://arxiv.org/abs/${arxivId}`,
+            pdfUrl:  `https://arxiv.org/pdf/${arxivId}`,
+            venue:   'arXiv',
           })
         }
         resolve(papers)
@@ -215,47 +202,134 @@ async function searchArxiv(query: string, maxResults = 20): Promise<PaperInput[]
   })
 }
 
-// ── GPT benchmark extraction ───────────────────────────────────────────────────
-async function extractBenchmarks(papers: PaperInput[], topic: string): Promise<BenchmarkRow[]> {
+// ── PDF download ───────────────────────────────────────────────────────────────
+function downloadPDFBuffer(pdfUrl: string, useDirectIP: boolean): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(pdfUrl)
+    const opts: https.RequestOptions = useDirectIP
+      ? {
+          hostname: OPENREVIEW_IP, port: 443,
+          path: parsed.pathname + parsed.search,
+          headers: { 'Host': OPENREVIEW_HOST, 'User-Agent': 'ResearchBlog/1.0', 'Accept': 'application/pdf' },
+          rejectUnauthorized: false, servername: '', timeout: 25000,
+        }
+      : {
+          hostname: parsed.hostname, port: 443,
+          path: parsed.pathname + parsed.search,
+          headers: { 'User-Agent': 'ResearchBlog/1.0', 'Accept': 'application/pdf' },
+          timeout: 20000,
+        }
+
+    const req = https.get(opts, (res) => {
+      if ((res.statusCode ?? 0) >= 400) { reject(new Error(`PDF ${res.statusCode}`)); return }
+      // Handle redirects (arXiv redirects PDF requests)
+      if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location) {
+        downloadPDFBuffer(res.headers.location, false).then(resolve).catch(reject)
+        return
+      }
+      const chunks: Buffer[] = []
+      res.on('data', (c: Buffer) => chunks.push(c))
+      res.on('end', () => resolve(Buffer.concat(chunks)))
+    })
+    req.on('timeout', () => { req.destroy(); reject(new Error('PDF download timed out')) })
+    req.on('error', reject)
+  })
+}
+
+function findExperimentSection(text: string): string {
+  // Find the Experiments / Results / Evaluation section heading
+  const headingRe = /\n\s*(?:\d+\.?\d*\.?\s+)?(?:experiments?|evaluation|empirical results?|results?|benchmarks?|performance)\s*\n/gi
+  const match = headingRe.exec(text)
+  if (!match) return text.slice(0, 4000)
+  const start = match.index + match[0].length
+  // Find the next major numbered section to cap the excerpt
+  const nextRe = /\n\s*\d+\s+[A-Z][a-zA-Z ]{3,}\n/g
+  nextRe.lastIndex = start
+  const next = nextRe.exec(text)
+  const end = next ? Math.min(next.index, start + 6000) : Math.min(start + 6000, text.length)
+  return text.slice(start, end)
+}
+
+async function getPaperText(paper: PaperInput): Promise<string> {
+  if (!paper.pdfUrl) return ''
+  try {
+    const isOR   = paper.pdfUrl.includes('openreview.net')
+    const buffer = await downloadPDFBuffer(paper.pdfUrl, isOR)
+    if (buffer.length < 1000) return ''
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const parsed: { text: string } = await pdfParse(buffer) as any
+    return findExperimentSection(parsed.text)
+  } catch {
+    return ''
+  }
+}
+
+// ── Benchmark extraction ───────────────────────────────────────────────────────
+// For top-2 papers: download full PDF, find Experiments section, extract from real tables.
+// For the rest: extract from abstract only.
+async function extractBenchmarks(
+  papers: PaperInput[],
+  topic: string,
+  onProgress?: (msg: string) => void,
+): Promise<BenchmarkRow[]> {
   if (papers.length === 0) return []
 
-  const papersText = papers
+  // Download full text for top-2 papers
+  const enriched = await Promise.all(
+    papers.slice(0, 2).map(async (p, i) => {
+      onProgress?.(`Downloading paper ${i+1}/2: "${p.title.slice(0, 50)}…"`)
+      const fullText = await getPaperText(p)
+      return { ...p, fullText }
+    })
+  )
+  // Remaining papers get abstract only
+  const rest = papers.slice(2).map(p => ({ ...p, fullText: '' }))
+  const all  = [...enriched, ...rest]
+
+  const papersText = all
     .slice(0, 20)
     .map((p, i) => {
       const kwLine = p.keywords?.length ? `\nKEYWORDS: ${p.keywords.slice(0, 8).join(', ')}` : ''
-      return `[${i + 1}] ${p.title} (${p.year})\nURL: ${p.url}${kwLine}\nABSTRACT: ${p.abstract.slice(0, 700)}`
+      const venLine = p.venue ? `\nVENUE: ${p.venue} ${p.year}` : ''
+      const body = p.fullText
+        ? `\nEXPERIMENT SECTION (from full PDF):\n${p.fullText.slice(0, 3000)}`
+        : `\nABSTRACT: ${p.abstract.slice(0, 700)}`
+      return `[${i+1}] ${p.title}${venLine}${kwLine}${body}\nURL: ${p.url}`
     })
     .join('\n\n---\n\n')
 
-  const prompt = `You are a research benchmark extractor specializing in "${topic}".
+  onProgress?.(`Extracting benchmark scores with AI…`)
 
-Given these paper abstracts (and keywords when available), extract ALL concrete benchmark results.
+  const prompt = `You are a research benchmark extractor for the topic "${topic}".
 
-For each result extract:
-- model: proposed model/method name (e.g., "iTransformer", "PatchTST", "GPT-4")
-- dataset: benchmark dataset name (e.g., "ETTh1", "ETTm2", "M4", "ImageNet")
-- metric: evaluation metric (e.g., "MSE", "MAE", "BLEU", "F1", "Accuracy")
-- score: exact numeric value (number only)
-- score_label: display string (e.g., "0.386", "95.2%")
-- higher_better: true if higher = better (false for error metrics: MSE, MAE, RMSE, FDE)
-- paper_index: the [N] number of the source paper
+Analyze the paper content below (some papers include their full Experiments section, others only abstracts).
 
-Rules:
-- Only extract when a concrete number is stated on a named dataset
-- A paper may contribute MULTIPLE rows (different datasets or metrics)
-- Ignore vague comparisons — must have an actual number
+For each CONCRETE benchmark result found, extract:
+- model: the proposed model/method name (e.g. "iTransformer", "PatchTST")
+- dataset: the benchmark dataset name (e.g. "ETTh1", "ETTm2", "M4", "ImageNet")
+- metric: the evaluation metric (e.g. "MSE", "MAE", "BLEU", "F1", "Accuracy", "RMSE")
+- score: the exact numeric value (number only)
+- score_label: display string (e.g. "0.386", "95.2%")
+- higher_better: true if higher is better; false for error metrics (MSE, MAE, RMSE, FDE, ADE)
+- paper_index: the [N] number from the source paper
+
+Focus on:
+- Tables labeled "Main results", "Comparison with SOTA", "Performance on..."
+- Rows where the proposed model is compared to baselines
+- Numeric scores reported on named standard datasets
 
 Papers:
 ${papersText}
 
-Return ONLY valid JSON: {"results": [{"model":"...", "dataset":"...", "metric":"...", "score":0.0, "score_label":"...", "higher_better":true, "paper_index":1}]}`
+Return ONLY valid JSON:
+{"results": [{"model":"...", "dataset":"...", "metric":"...", "score":0.0, "score_label":"...", "higher_better":true, "paper_index":1}]}`
 
   const resp = await openai.chat.completions.create({
     model: 'gpt-4o-mini',
     messages: [{ role: 'user', content: prompt }],
     response_format: { type: 'json_object' },
     temperature: 0,
-    max_tokens: 3000,
+    max_tokens: 4000,
   })
 
   try {
@@ -281,15 +355,15 @@ Return ONLY valid JSON: {"results": [{"model":"...", "dataset":"...", "metric":"
   } catch { return [] }
 }
 
-// ── Aggregate into ranked tables ───────────────────────────────────────────────
+// ── Build ranked tables ────────────────────────────────────────────────────────
 function buildTables(rows: BenchmarkRow[]): BenchmarkTable[] {
   const map = new Map<string, BenchmarkTable>()
   for (const row of rows) {
     const key = `${row.dataset.toLowerCase()}::${row.metric.toLowerCase()}`
     if (!map.has(key)) map.set(key, { dataset: row.dataset, metric: row.metric, higherBetter: row.higherBetter, rows: [] })
-    const table = map.get(key)!
-    const dupe = table.rows.find(r => r.model.toLowerCase() === row.model.toLowerCase())
-    if (!dupe) table.rows.push(row)
+    const t = map.get(key)!
+    const dupe = t.rows.find(r => r.model.toLowerCase() === row.model.toLowerCase())
+    if (!dupe) t.rows.push(row)
     else if (row.higherBetter ? row.score > dupe.score : row.score < dupe.score) Object.assign(dupe, row)
   }
   for (const t of map.values()) {
@@ -302,18 +376,16 @@ function buildTables(rows: BenchmarkRow[]): BenchmarkTable[] {
 // ── Auth helper ────────────────────────────────────────────────────────────────
 async function requireAuth(req: NextRequest) {
   const session = await getServerSession(authOptions)
-  if (!session?.user) return null
-  return session
+  return session?.user ? session : null
 }
 
-// ── POST — extract from provided papers (from current discover search results) ──
+// ── POST — extract from provided papers ───────────────────────────────────────
 export async function POST(req: NextRequest) {
   if (!await requireAuth(req)) return NextResponse.json({ error: 'Auth required' }, { status: 401 })
   const body = await req.json() as { papers: PaperInput[]; topic: string }
   if (!body.papers?.length) return NextResponse.json({ error: 'No papers provided' }, { status: 400 })
   try {
-    // Semantic re-rank provided papers by topic before extraction
-    const topic = body.topic ?? 'research'
+    const topic  = body.topic ?? 'research'
     const ranked = await semanticRank(topic, body.papers, 20)
     const rows   = await extractBenchmarks(ranked, topic)
     const tables = buildTables(rows)
@@ -323,14 +395,13 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// ── GET — SSE streaming, 3 visible steps: Search → Re-rank → Extract/Build ──────
+// ── GET — SSE streaming, 3 steps ──────────────────────────────────────────────
 export async function GET(req: NextRequest) {
   if (!await requireAuth(req)) return NextResponse.json({ error: 'Auth required' }, { status: 401 })
   const sp  = new URL(req.url).searchParams
   const q   = sp.get('q')?.trim() ?? ''
   if (!q)   return NextResponse.json({ error: 'Query required' }, { status: 400 })
-
-  const source = sp.get('source') ?? 'openreview'   // 'openreview' | 'arxiv'
+  const source = sp.get('source') ?? 'openreview'
 
   const encoder = new TextEncoder()
   const stream = new ReadableStream({
@@ -356,8 +427,7 @@ export async function GET(req: NextRequest) {
             message: source === 'arxiv'
               ? 'No papers found on arXiv for this query.'
               : 'No papers found on OpenReview. Try searching arXiv instead.' })
-          controller.close()
-          return
+          controller.close(); return
         }
 
         send({ step: 1, status: 'done', source, papers: candidates, count: candidates.length })
@@ -365,16 +435,17 @@ export async function GET(req: NextRequest) {
         // ── Step 2: semantic re-rank ─────────────────────────────────────────────
         send({ step: 2, status: 'ranking',
           message: `Ranking ${candidates.length} papers by semantic similarity to "${q}"…` })
-
         const ranked = await semanticRank(q, candidates, 20)
         send({ step: 2, status: 'done', papers: ranked, count: ranked.length,
           message: `Top ${ranked.length} most relevant papers selected` })
 
-        // ── Step 3: benchmark extraction ─────────────────────────────────────────
+        // ── Step 3: download top-2 PDFs + extract benchmarks ─────────────────────
         send({ step: 3, status: 'extracting',
-          message: `Scanning ${ranked.length} papers for benchmark scores…` })
+          message: `Downloading top 2 papers for full experiment data…` })
 
-        const rows   = await extractBenchmarks(ranked, q)
+        const rows = await extractBenchmarks(ranked, q, (msg) => {
+          send({ step: 3, status: 'extracting', message: msg })
+        })
         const tables = buildTables(rows)
         send({ step: 3, status: 'done', tables, extracted: rows.length, papers: ranked.length })
 
