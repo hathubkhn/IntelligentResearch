@@ -210,7 +210,8 @@ export default function DiscoverPage() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            conference, year, topics,
+            conference, year,
+            topics: buildTopicQuery(),
             methods: selectedMethods, domains: selectedDomains, tasks: selectedTasks,
             maxResults, matchedCount: resultPapers.length,
             papers: compactPapers,
