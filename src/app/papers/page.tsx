@@ -1,4 +1,5 @@
 import { Suspense } from 'react'
+import { PaginationBar } from '@/components/search/PaginationBar'
 import { prisma } from '@/lib/prisma'
 import { getCached, setCached } from '@/lib/cache'
 import { PaperCard } from '@/components/paper/PaperCard'
@@ -142,7 +143,7 @@ export default async function PapersPage({ searchParams }: PapersPageProps) {
       </div>
 
       <div className="flex gap-8">
-        <div className="hidden lg:block w-48 flex-shrink-0">
+        <div className="hidden lg:block w-56 flex-shrink-0">
           <Suspense fallback={null}>
             <FilterPanel categories={categories} years={years} tags={tags} venues={venues} collections={collections} />
           </Suspense>
@@ -168,21 +169,7 @@ export default async function PapersPage({ searchParams }: PapersPageProps) {
               </div>
 
               {totalPages > 1 && (
-                <div className="flex justify-center gap-2 mt-10">
-                  {Array.from({ length: totalPages }, (_, i) => i + 1).map(p => (
-                    <a
-                      key={p}
-                      href={`/papers?${new URLSearchParams({ ...params, page: String(p) })}`}
-                      className={`px-3 py-1.5 rounded text-sm transition-colors ${
-                        p === page
-                          ? 'bg-blue-600 text-white'
-                          : 'text-white/40 hover:text-white hover:bg-white/10'
-                      }`}
-                    >
-                      {p}
-                    </a>
-                  ))}
-                </div>
+                <PaginationBar page={page} totalPages={totalPages} params={params} />
               )}
             </>
           )}

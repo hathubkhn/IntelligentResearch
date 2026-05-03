@@ -42,7 +42,7 @@ function LoginForm() {
         }
         // After signup, sign in
         const signInRes = await signIn('credentials', {
-          username,
+          email: username,
           password,
           redirect: false,
         })
@@ -54,7 +54,7 @@ function LoginForm() {
       } else {
         // Sign in
         const res = await signIn('credentials', {
-          username,
+          email: username,
           password,
           redirect: false,
         })

@@ -18,29 +18,29 @@ export const authOptions: NextAuthOptions = {
     CredentialsProvider({
       name: 'Credentials',
       credentials: {
-        username: { label: 'Username', type: 'text' },
+        email:    { label: 'Email', type: 'text' },
         password: { label: 'Password', type: 'password' },
       },
       async authorize(credentials) {
-        if (!credentials?.username || !credentials?.password) return null
+        if (!credentials?.email || !credentials?.password) return null
 
         // Try admin login first
         const adminEmail = process.env.ADMIN_EMAIL
         const adminPasswordHash = process.env.ADMIN_PASSWORD_HASH
-        if (adminEmail && adminPasswordHash && credentials.username === adminEmail) {
+        if (adminEmail && adminPasswordHash && credentials.email === adminEmail) {
           const isValid = await bcrypt.compare(credentials.password, adminPasswordHash)
           if (isValid) {
             return { id: 'admin', email: adminEmail, name: 'Admin', role: 'admin' }
           }
         }
 
-        // Try regular user login (by username)
+        // Try regular user login (by email or username)
         const user = await prisma.user.findFirst({
           where: {
-            name: {
-              equals: credentials.username,
-              mode: 'insensitive',
-            },
+            OR: [
+              { email: { equals: credentials.email, mode: 'insensitive' } },
+              { name:  { equals: credentials.email, mode: 'insensitive' } },
+            ],
             password: { not: null },
           },
         })
@@ -51,10 +51,10 @@ export const authOptions: NextAuthOptions = {
         if (!isValid) return null
 
         return {
-          id: user.id,
-          name: user.name,
+          id:    user.id,
+          name:  user.name,
           email: user.email,
-          role: 'user',
+          role:  'user',
         }
       },
     }),

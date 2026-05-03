@@ -35,8 +35,15 @@ export default function EditPaperPage({ params }: Props) {
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    fetch(`/api/papers/${id}`).then(r => r.json()).then(setPaper)
-    fetch('/api/admin/categories').then(r => r.json()).then(setCategories)
+    fetch(`/api/papers/${id}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data) setPaper(data) })
+      .catch(() => {})
+
+    fetch('/api/admin/categories')
+      .then(r => r.ok ? r.json() : [])
+      .then(data => setCategories(Array.isArray(data) ? data : []))
+      .catch(() => {})
   }, [id])
 
   const save = async () => {

@@ -8,14 +8,66 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
 // OpenReview v2: use content.venueid to get accepted papers only.
 // Papers assigned a venue ID by the PCs are accepted; rejected papers are not tagged.
-const VENUE_IDS: Record<string, Partial<Record<number, string>>> = {
-  ICLR:    { 2022: 'ICLR.cc/2022/Conference', 2023: 'ICLR.cc/2023/Conference', 2024: 'ICLR.cc/2024/Conference', 2025: 'ICLR.cc/2025/Conference' },
-  NeurIPS: { 2021: 'NeurIPS.cc/2021/Conference', 2022: 'NeurIPS.cc/2022/Conference', 2023: 'NeurIPS.cc/2023/Conference', 2024: 'NeurIPS.cc/2024/Conference' },
-  ICML:    { 2022: 'ICML.cc/2022/Conference', 2023: 'ICML.cc/2023/Conference', 2024: 'ICML.cc/2024/Conference', 2025: 'ICML.cc/2025/Conference' },
-  COLM:    { 2024: 'COLM.cc/2024/Conference', 2025: 'COLM.cc/2025/Conference' },
-  TMLR:    { 2022: 'TMLR', 2023: 'TMLR', 2024: 'TMLR', 2025: 'TMLR' },
-  AISTATS: { 2024: 'AISTATS.cc/2024/Conference', 2025: 'AISTATS.cc/2025/Conference' },
-  UAI:     { 2023: 'auai.org/UAI/2023/Conference', 2024: 'auai.org/UAI/2024/Conference' },
+export const VENUE_IDS: Record<string, Partial<Record<number, string>>> = {
+  // ── ML / AI ──────────────────────────────────────────────────────────────────
+  ICLR:    {
+    2020: 'ICLR.cc/2020/Conference',
+    2021: 'ICLR.cc/2021/Conference',
+    2022: 'ICLR.cc/2022/Conference',
+    2023: 'ICLR.cc/2023/Conference',
+    2024: 'ICLR.cc/2024/Conference',
+    2025: 'ICLR.cc/2025/Conference',
+  },
+  NeurIPS: {
+    2021: 'NeurIPS.cc/2021/Conference',
+    2022: 'NeurIPS.cc/2022/Conference',
+    2023: 'NeurIPS.cc/2023/Conference',
+    2024: 'NeurIPS.cc/2024/Conference',
+  },
+  ICML:    {
+    2022: 'ICML.cc/2022/Conference',
+    2023: 'ICML.cc/2023/Conference',
+    2024: 'ICML.cc/2024/Conference',
+    2025: 'ICML.cc/2025/Conference',
+  },
+  AISTATS: {
+    2024: 'AISTATS.cc/2024/Conference',
+    2025: 'AISTATS.cc/2025/Conference',
+  },
+  UAI: {
+    2023: 'auai.org/UAI/2023/Conference',
+    2024: 'auai.org/UAI/2024/Conference',
+  },
+  // ── NLP ──────────────────────────────────────────────────────────────────────
+  ACL: {
+    2023: 'aclweb.org/ACL/2023/Conference',
+    2024: 'aclweb.org/ACL/2024/Conference',
+  },
+  EMNLP: {
+    2023: 'aclweb.org/EMNLP/2023/Conference',
+    2024: 'aclweb.org/EMNLP/2024/Conference',
+  },
+  NAACL: {
+    2024: 'aclweb.org/NAACL/2024/Conference',
+  },
+  EACL: {
+    2024: 'aclweb.org/EACL/2024/Conference',
+  },
+  // ── Specialized ──────────────────────────────────────────────────────────────
+  COLM: {
+    2024: 'COLM.cc/2024/Conference',
+    2025: 'COLM.cc/2025/Conference',
+  },
+  TMLR: {
+    2022: 'TMLR',
+    2023: 'TMLR',
+    2024: 'TMLR',
+    2025: 'TMLR',
+  },
+  CoRL: {
+    2023: 'robot-learning.org/CoRL/2023/Conference',
+    2024: 'robot-learning.org/CoRL/2024/Conference',
+  },
 }
 
 export interface OpenReviewPaper {
@@ -120,7 +172,7 @@ function filterAndScore(note: ORNote, groups: TermGroups): number | null {
   return score > 0 ? score : 1 // always positive since at least one group matched
 }
 
-function mapNote(note: ORNote, conference: string, year: number): OpenReviewPaper {
+export function mapNote(note: ORNote, conference: string, year: number): OpenReviewPaper {
   return {
     openReviewId: note.id,
     title: note.content.title?.value ?? '(no title)',
@@ -209,7 +261,7 @@ function fetchPage(urlObj: URL): Promise<{ notes: ORNote[] }> {
 
 // Fetch up to maxFetch notes, paginating through the API.
 // OpenReview v2: parameter is "content.venueid" (not "venueid").
-async function fetchNotes(venueId: string, maxFetch: number): Promise<{ notes: ORNote[]; fetchedCount: number }> {
+export async function fetchNotes(venueId: string, maxFetch: number): Promise<{ notes: ORNote[]; fetchedCount: number }> {
   const PAGE = 200
   const notes: ORNote[] = []
   let offset = 0
