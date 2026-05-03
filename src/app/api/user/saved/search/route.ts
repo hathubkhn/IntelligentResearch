@@ -82,52 +82,75 @@ export async function GET(req: NextRequest) {
 
   // ── Semantic search (when query given) ────────────────────────────────────────
   if (q) {
-    let embedding: number[]
+    // 1. Keyword search across ALL saved papers (regardless of embedding)
+    //    Split query into tokens, require all to appear in title or tldr
+    const terms = q.split(/\s+/).filter(Boolean)
+    const keywordWhere = {
+      id: { in: ids },
+      AND: terms.map(t => ({
+        OR: [
+          { title:   { contains: t, mode: 'insensitive' as const } },
+          { tldr:    { contains: t, mode: 'insensitive' as const } },
+          { problem: { contains: t, mode: 'insensitive' as const } },
+          { keyIdea: { contains: t, mode: 'insensitive' as const } },
+        ],
+      })),
+      ...(venue    ? { venue:    { contains: venue,    mode: 'insensitive' as const } } : {}),
+      ...(year !== null ? { year } : {}),
+      ...(category ? { category: { equals: category } } : {}),
+    }
+
+    // 2. Semantic (vector) search for papers WITH embeddings
+    let vectorPapers: (SavedSearchResult & { similarity: number })[] = []
     try {
-      embedding = await generateEmbedding(q)
-    } catch {
-      return Response.json({ error: 'Embedding generation failed' }, { status: 503 })
-    }
+      const embedding = await generateEmbedding(q)
+      const vector    = `[${embedding.join(',')}]`
+      const idList    = ids.map(id => `'${id}'`).join(', ')
 
-    const vector = `[${embedding.join(',')}]`
-    // UUIDs only contain [0-9a-f-], safe to inline
-    const idList = ids.map(id => `'${id}'`).join(', ')
+      const params: unknown[] = [vector]
+      const extraConds: string[] = []
+      if (venue) {
+        params.push(`%${venue}%`)
+        extraConds.push(`venue ILIKE $${params.length}`)
+      }
+      if (year !== null) {
+        params.push(year)
+        extraConds.push(`year = $${params.length}`)
+      }
+      if (category) {
+        params.push(category)
+        extraConds.push(`category = $${params.length}`)
+      }
+      const filterClause = extraConds.length ? `AND ${extraConds.join(' AND ')}` : ''
 
-    const params: unknown[] = [vector]
-    const extraConds: string[] = []
+      type Row = SavedSearchResult & { similarity: number }
+      vectorPapers = await prisma.$queryRawUnsafe<Row[]>(
+        `SELECT id, title, authors, year, venue, "venueType", category, tags,
+                "isPublished", "paperUrl", "codeUrl", "openReviewUrl", "arxivId",
+                "rawInput", tldr, problem, "keyIdea", results, contributions,
+                "methodDiagram", "methodDescription", "coverColor", status,
+                "errorMessage", "collectionId", "createdAt", "updatedAt",
+                ROUND(CAST(1 - (embedding <=> $1::vector) AS numeric), 4) AS similarity
+         FROM "Paper"
+         WHERE id IN (${idList})
+           AND embedding IS NOT NULL
+           ${filterClause}
+         ORDER BY embedding <=> $1::vector
+         LIMIT 60`,
+        ...params,
+      )
+    } catch { /* embedding generation failed — fall back to keyword only */ }
 
-    if (venue) {
-      params.push(`%${venue}%`)
-      extraConds.push(`venue ILIKE $${params.length}`)
-    }
-    if (year !== null) {
-      params.push(year)
-      extraConds.push(`year = $${params.length}`)
-    }
-    if (category) {
-      params.push(category)
-      extraConds.push(`category = $${params.length}`)
-    }
+    // 3. Fetch keyword-matched papers (catches papers with no embedding)
+    const keywordPapers = await prisma.paper.findMany({ where: keywordWhere })
 
-    const filterClause = extraConds.length ? `AND ${extraConds.join(' AND ')}` : ''
+    // 4. Merge: vector results first (with similarity), then keyword-only extras
+    const seenIds = new Set(vectorPapers.map(p => p.id))
+    const keywordOnly = keywordPapers
+      .filter(p => !seenIds.has(p.id))
+      .map(p => ({ ...p, similarity: null } as unknown as SavedSearchResult & { similarity: number }))
 
-    type Row = SavedSearchResult & { similarity: number }
-    const papers = await prisma.$queryRawUnsafe<Row[]>(
-      `SELECT id, title, authors, year, venue, "venueType", category, tags,
-              "isPublished", "paperUrl", "codeUrl", "openReviewUrl", "arxivId",
-              "rawInput", tldr, problem, "keyIdea", results, contributions,
-              "methodDiagram", "methodDescription", "coverColor", status,
-              "errorMessage", "collectionId", "createdAt", "updatedAt",
-              ROUND(CAST(1 - (embedding <=> $1::vector) AS numeric), 4) AS similarity
-       FROM "Paper"
-       WHERE id IN (${idList})
-         AND embedding IS NOT NULL
-         ${filterClause}
-       ORDER BY embedding <=> $1::vector
-       LIMIT 60`,
-      ...params,
-    )
-
+    const papers = [...vectorPapers, ...keywordOnly]
     return Response.json({ papers, facets, query: q })
   }
 

@@ -1,10 +1,13 @@
 'use client'
 
+import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { FileText, Code2 } from 'lucide-react'
+import { FileText, Code2, FolderPlus } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { SaveButton } from './SaveButton'
+import { CollectionPickerModal } from './CollectionPickerModal'
 import { getCategoryColor, getVenueTier } from '@/lib/utils'
+import { useSession } from 'next-auth/react'
 import type { Paper } from '@/types/paper'
 
 interface PaperCardProps {
@@ -13,10 +16,14 @@ interface PaperCardProps {
 
 export function PaperCard({ paper }: PaperCardProps) {
   const router = useRouter()
+  const { data: session, status } = useSession()
+  const isUser = status === 'authenticated' && (session?.user as { role?: string })?.role === 'user'
+  const [collectionOpen, setCollectionOpen] = useState(false)
   const gradientClass = paper.coverColor ?? getCategoryColor(paper.category)
   const venueTier = getVenueTier(paper.venue)
 
   return (
+    <>
     <div
       className="group relative h-full rounded-xl border border-slate-800/80 bg-slate-900/60 backdrop-blur-sm overflow-hidden transition-all duration-200 hover:scale-[1.02] hover:shadow-2xl hover:shadow-blue-500/5 hover:border-slate-700/80 cursor-pointer"
       onClick={() => router.push(`/papers/${paper.id}`)}
@@ -85,11 +92,29 @@ export function PaperCard({ paper }: PaperCardProps) {
               <Code2 className="h-3 w-3" /> Code
             </a>
           )}
-          <div className="ml-auto">
+          <div className="ml-auto flex items-center gap-1">
+            {isUser && (
+              <button
+                onClick={e => { e.preventDefault(); e.stopPropagation(); setCollectionOpen(true) }}
+                title="Add to collection"
+                className="text-white/25 hover:text-white/60 transition-colors"
+              >
+                <FolderPlus className="h-4 w-4" />
+              </button>
+            )}
             <SaveButton paperId={paper.id} />
           </div>
         </div>
       </div>
     </div>
+
+    {collectionOpen && (
+      <CollectionPickerModal
+        paperId={paper.id}
+        paperTitle={paper.title}
+        onClose={() => setCollectionOpen(false)}
+      />
+    )}
+  </>
   )
 }

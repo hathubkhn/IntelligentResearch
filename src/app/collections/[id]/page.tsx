@@ -1,8 +1,10 @@
 import { notFound } from 'next/navigation'
 import Link from 'next/link'
 import { Suspense } from 'react'
-import { ArrowLeft, ExternalLink } from 'lucide-react'
+import { ArrowLeft, ExternalLink, Lock } from 'lucide-react'
 import { prisma } from '@/lib/prisma'
+import { getServerSession } from 'next-auth'
+import { authOptions } from '@/lib/auth'
 
 export const dynamic = 'force-dynamic'
 import { PaperCard } from '@/components/paper/PaperCard'
@@ -18,59 +20,101 @@ export default async function CollectionPage({ params, searchParams }: Props) {
   const { id } = await params
   const { q, year, venue } = await searchParams
 
+  const session = await getServerSession(authOptions)
+  const userId = (session?.user as { id?: string; role?: string })?.role === 'user'
+    ? (session?.user as { id?: string }).id
+    : null
+
   const collection = await prisma.collection.findUnique({
     where: { id },
-    select: { id: true, name: true, description: true, sourceUrl: true },
+    select: { id: true, name: true, description: true, sourceUrl: true, userId: true },
   })
 
   if (!collection) notFound()
 
-  // Build filter
-  const where: Record<string, unknown> = { collectionId: id }
-  if (q) {
-    where.OR = [
-      { title: { contains: q, mode: 'insensitive' } },
-      { tldr: { contains: q, mode: 'insensitive' } },
-      { authors: { has: q } },
-    ]
+  // Private collection: only the owner can view it
+  if (collection.userId !== null && collection.userId !== userId) notFound()
+
+  // Paper queries differ by collection type:
+  // - Public admin collections: papers linked via Paper.collectionId
+  // - Private user collections: papers linked via UserCollectionItem
+  const isUserCollection = collection.userId !== null
+
+  let papers: Awaited<ReturnType<typeof prisma.paper.findMany>> = []
+  let totalCount = 0
+  let years:  number[] = []
+  let venues: string[] = []
+
+  if (isUserCollection) {
+    // Fetch paper IDs from join table first
+    const items = await prisma.userCollectionItem.findMany({
+      where: { collectionId: id },
+      select: { paperId: true },
+    })
+    const paperIds = items.map(i => i.paperId)
+
+    const baseWhere: Record<string, unknown> = { id: { in: paperIds } }
+    if (q) {
+      baseWhere.OR = [
+        { title: { contains: q, mode: 'insensitive' } },
+        { tldr:  { contains: q, mode: 'insensitive' } },
+      ]
+    }
+    if (year)  baseWhere.year  = parseInt(year)
+    if (venue) baseWhere.venue = { equals: venue, mode: 'insensitive' }
+
+    const [p, yearRows, venueRows] = await Promise.all([
+      prisma.paper.findMany({ where: baseWhere, orderBy: [{ year: 'desc' }, { createdAt: 'desc' }] }),
+      prisma.paper.findMany({ where: { id: { in: paperIds }, year: { not: null } }, select: { year: true }, distinct: ['year'], orderBy: { year: 'desc' } }),
+      prisma.paper.findMany({ where: { id: { in: paperIds }, venue: { not: null } }, select: { venue: true }, distinct: ['venue'], orderBy: { venue: 'asc' } }),
+    ])
+    papers     = p
+    totalCount = paperIds.length
+    years      = yearRows.map(r => r.year!).filter(Boolean) as number[]
+    venues     = venueRows.map(r => r.venue!).filter(Boolean) as string[]
+  } else {
+    // Public admin collection — original logic via Paper.collectionId
+    const baseWhere: Record<string, unknown> = { collectionId: id }
+    if (q) {
+      baseWhere.OR = [
+        { title: { contains: q, mode: 'insensitive' } },
+        { tldr:  { contains: q, mode: 'insensitive' } },
+        { authors: { has: q } },
+      ]
+    }
+    if (year)  baseWhere.year  = parseInt(year)
+    if (venue) baseWhere.venue = { equals: venue, mode: 'insensitive' }
+
+    const [p, cnt, yearRows, venueRows] = await Promise.all([
+      prisma.paper.findMany({ where: baseWhere, orderBy: [{ year: 'desc' }, { createdAt: 'desc' }] }),
+      prisma.paper.count({ where: { collectionId: id } }),
+      prisma.paper.findMany({ where: { collectionId: id, year: { not: null } }, select: { year: true }, distinct: ['year'], orderBy: { year: 'desc' } }),
+      prisma.paper.findMany({ where: { collectionId: id, venue: { not: null } }, select: { venue: true }, distinct: ['venue'], orderBy: { venue: 'asc' } }),
+    ])
+    papers     = p
+    totalCount = cnt
+    years      = yearRows.map(r => r.year!).filter(Boolean) as number[]
+    venues     = venueRows.map(r => r.venue!).filter(Boolean) as string[]
   }
-  if (year) where.year = parseInt(year)
-  if (venue) where.venue = { equals: venue, mode: 'insensitive' }
-
-  const [papers, totalCount, yearRows, venueRows] = await Promise.all([
-    prisma.paper.findMany({
-      where,
-      orderBy: [{ year: 'desc' }, { createdAt: 'desc' }],
-    }),
-    prisma.paper.count({ where: { collectionId: id } }),
-    prisma.paper.findMany({
-      where: { collectionId: id, year: { not: null } },
-      select: { year: true },
-      distinct: ['year'],
-      orderBy: { year: 'desc' },
-    }),
-    prisma.paper.findMany({
-      where: { collectionId: id, venue: { not: null } },
-      select: { venue: true },
-      distinct: ['venue'],
-      orderBy: { venue: 'asc' },
-    }),
-  ])
-
-  const years = yearRows.map(r => r.year!).filter(Boolean) as number[]
-  const venues = venueRows.map(r => r.venue!).filter(Boolean) as string[]
 
   return (
     <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-10">
       <Link
-        href="/collections"
+        href={isUserCollection ? '/saved' : '/collections'}
         className="inline-flex items-center gap-1.5 text-sm text-slate-500 hover:text-white transition-colors mb-8"
       >
-        <ArrowLeft className="h-4 w-4" /> All collections
+        <ArrowLeft className="h-4 w-4" /> {isUserCollection ? 'My reading list' : 'All collections'}
       </Link>
 
       <div className="mb-8">
-        <h1 className="text-3xl font-bold text-white mb-2">{collection.name}</h1>
+        <div className="flex items-center gap-2 mb-2">
+          <h1 className="text-3xl font-bold text-white">{collection.name}</h1>
+          {isUserCollection && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/8 text-white/40 text-xs">
+              <Lock className="h-3 w-3" /> Private
+            </span>
+          )}
+        </div>
         {collection.description && (
           <p className="text-slate-400 mb-3 max-w-2xl">{collection.description}</p>
         )}

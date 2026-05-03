@@ -5,11 +5,14 @@ import { useSession, signIn } from 'next-auth/react'
 import {
   Bookmark, Download, Trash2, GitFork, Search, SlidersHorizontal,
   X, Sparkles, Loader2, ChevronDown, ChevronUp, Filter,
+  Layers, FolderPlus, Plus, Pencil, Check, Trash,
 } from 'lucide-react'
+import Link from 'next/link'
 import { PaperCard } from '@/components/paper/PaperCard'
 import { getLocalSaved } from '@/components/paper/SaveButton'
 import type { Paper } from '@/types/paper'
-import type { Facets, SavedSearchResult } from '@/app/api/user/saved/search/route'
+import type { Facets } from '@/app/api/user/saved/search/route'
+import type { UserCollection } from '@/components/paper/CollectionPickerModal'
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 function toLocalYear(paper: Paper): number | null { return paper.year }
@@ -85,10 +88,22 @@ export default function SavedPage() {
   const isUser  = status === 'authenticated' && (session?.user as { role?: string })?.role === 'user'
   const isGuest = status !== 'authenticated' || (session?.user as { role?: string })?.role !== 'user'
 
+  // Tab: 'papers' | 'collections'
+  const [activeTab, setActiveTab] = useState<'papers' | 'collections'>('papers')
+
   // All papers loaded from DB / localStorage
   const [allPapers,  setAllPapers]  = useState<Paper[]>([])
   const [facets,     setFacets]     = useState<Facets>({ venues: [], years: [], categories: [] })
   const [loading,    setLoading]    = useState(true)
+
+  // User collections state
+  const [collections,     setCollections]     = useState<UserCollection[]>([])
+  const [colLoading,      setColLoading]      = useState(false)
+  const [newColName,      setNewColName]      = useState('')
+  const [creatingCol,     setCreatingCol]     = useState(false)
+  const [showNewColInput, setShowNewColInput] = useState(false)
+  const [editingColId,    setEditingColId]    = useState<string | null>(null)
+  const [editingColName,  setEditingColName]  = useState('')
 
   // Search / filter state
   const [query,        setQuery]        = useState('')
@@ -129,6 +144,62 @@ export default function SavedPage() {
     window.addEventListener('saved-papers-change', handler)
     return () => window.removeEventListener('saved-papers-change', handler)
   }, [status, load])
+
+  // ── Collections load ───────────────────────────────────────────────────────
+  const loadCollections = useCallback(async () => {
+    if (!isUser) return
+    setColLoading(true)
+    try {
+      const res  = await fetch('/api/user/collections')
+      const data = await res.json() as { collections: UserCollection[] }
+      setCollections(data.collections ?? [])
+    } catch { /* ignore */ }
+    setColLoading(false)
+  }, [isUser])
+
+  useEffect(() => {
+    if (activeTab === 'collections' && isUser) loadCollections()
+  }, [activeTab, isUser, loadCollections])
+
+  const createCollection = async () => {
+    if (!newColName.trim() || creatingCol) return
+    setCreatingCol(true)
+    try {
+      const res  = await fetch('/api/user/collections', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newColName.trim() }),
+      })
+      const data = await res.json() as { collection: UserCollection }
+      if (data.collection) {
+        setCollections(prev => [data.collection, ...prev])
+        setNewColName('')
+        setShowNewColInput(false)
+      }
+    } catch { /* ignore */ }
+    setCreatingCol(false)
+  }
+
+  const renameCollection = async (id: string) => {
+    if (!editingColName.trim()) return
+    try {
+      await fetch(`/api/user/collections/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: editingColName.trim() }),
+      })
+      setCollections(prev => prev.map(c => c.id === id ? { ...c, name: editingColName.trim() } : c))
+    } catch { /* ignore */ }
+    setEditingColId(null)
+  }
+
+  const deleteCollection = async (id: string, name: string) => {
+    if (!window.confirm(`Delete collection "${name}"? This won't remove papers from your reading list.`)) return
+    try {
+      await fetch(`/api/user/collections/${id}`, { method: 'DELETE' })
+      setCollections(prev => prev.filter(c => c.id !== id))
+    } catch { /* ignore */ }
+  }
 
   // ── Search / filter logic ─────────────────────────────────────────────────────
   const doSearch = useCallback(async (q: string, venue: string, year: string, cat: string) => {
@@ -211,7 +282,7 @@ export default function SavedPage() {
     <div className="mx-auto max-w-8xl px-4 sm:px-6 lg:px-8 py-8">
 
       {/* ── Page header ── */}
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-5">
         <div>
           <h1 className="text-xl font-bold text-white flex items-center gap-2">
             <Bookmark className="h-5 w-5 text-blue-400" />
@@ -230,28 +301,161 @@ export default function SavedPage() {
           )}
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={() => setSidebarOpen(o => !o)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/10 bg-white/[0.03] hover:bg-white/8 text-white/40 hover:text-white/70 text-xs transition-colors">
-            <SlidersHorizontal className="h-3.5 w-3.5" />
-            Filters
-          </button>
-          {allPapers.length > 0 && (
+          {activeTab === 'papers' && (
             <>
-              <button onClick={exportBibtex}
+              <button onClick={() => setSidebarOpen(o => !o)}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/10 bg-white/[0.03] hover:bg-white/8 text-white/40 hover:text-white/70 text-xs transition-colors">
-                <Download className="h-3.5 w-3.5" /> BibTeX
+                <SlidersHorizontal className="h-3.5 w-3.5" />
+                Filters
               </button>
-              <button onClick={clearAll}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/8 hover:border-red-500/30 bg-transparent hover:bg-red-500/5 text-white/25 hover:text-red-400 text-xs transition-colors">
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
+              {allPapers.length > 0 && (
+                <>
+                  <button onClick={exportBibtex}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/10 bg-white/[0.03] hover:bg-white/8 text-white/40 hover:text-white/70 text-xs transition-colors">
+                    <Download className="h-3.5 w-3.5" /> BibTeX
+                  </button>
+                  <button onClick={clearAll}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/8 hover:border-red-500/30 bg-transparent hover:bg-red-500/5 text-white/25 hover:text-red-400 text-xs transition-colors">
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </>
+              )}
             </>
+          )}
+          {activeTab === 'collections' && isUser && (
+            <button
+              onClick={() => setShowNewColInput(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/10 bg-white/[0.03] hover:bg-white/8 text-white/40 hover:text-white/70 text-xs transition-colors">
+              <Plus className="h-3.5 w-3.5" /> New collection
+            </button>
           )}
         </div>
       </div>
 
-      {/* ── Main layout: sidebar + content ── */}
-      <div className="flex gap-5">
+      {/* ── Tabs ── */}
+      {isUser && (
+        <div className="flex gap-1 mb-6 border-b border-white/8">
+          {(['papers', 'collections'] as const).map(tab => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px flex items-center gap-2 ${
+                activeTab === tab
+                  ? 'border-blue-500 text-white'
+                  : 'border-transparent text-white/40 hover:text-white/70'
+              }`}>
+              {tab === 'papers'
+                ? <><Bookmark className="h-3.5 w-3.5" /> Papers</>
+                : <><Layers  className="h-3.5 w-3.5" /> My Collections {collections.length > 0 && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-white/8 text-white/40">{collections.length}</span>}</>
+              }
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* ── Collections tab ── */}
+      {activeTab === 'collections' && isUser && (
+        <div>
+          {/* New collection input */}
+          {showNewColInput && (
+            <div className="flex gap-2 mb-5">
+              <input
+                autoFocus
+                value={newColName}
+                onChange={e => setNewColName(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') createCollection(); if (e.key === 'Escape') { setShowNewColInput(false); setNewColName('') } }}
+                placeholder="Collection name…"
+                maxLength={80}
+                className="flex-1 bg-white/5 border border-white/12 rounded-xl px-4 py-2.5 text-sm text-white placeholder:text-white/25 focus:outline-none focus:border-blue-500/50"
+              />
+              <button
+                onClick={createCollection}
+                disabled={!newColName.trim() || creatingCol}
+                className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-sm font-medium transition-colors flex items-center gap-2">
+                {creatingCol ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                Create
+              </button>
+              <button
+                onClick={() => { setShowNewColInput(false); setNewColName('') }}
+                className="px-3 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-white/40 hover:text-white text-sm transition-colors">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
+
+          {colLoading ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+              {[1,2,3].map(i => <div key={i} className="h-28 rounded-xl bg-white/[0.04] border border-white/8 animate-pulse" />)}
+            </div>
+          ) : collections.length === 0 ? (
+            <div className="text-center py-20 space-y-4">
+              <Layers className="h-12 w-12 text-white/10 mx-auto" />
+              <p className="text-white/30 text-sm">No collections yet.</p>
+              <button
+                onClick={() => setShowNewColInput(true)}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600/15 border border-blue-500/25 text-blue-300 hover:bg-blue-600/25 text-sm transition-colors">
+                <FolderPlus className="h-4 w-4" /> Create your first collection
+              </button>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+              {collections.map(col => (
+                <div key={col.id} className="group relative rounded-xl border border-slate-800/80 bg-slate-900/60 backdrop-blur-sm p-5 hover:border-slate-700/80 transition-all">
+                  <div className="flex items-start justify-between gap-2 mb-3">
+                    <Layers className="h-6 w-6 text-blue-400 flex-shrink-0 mt-0.5" />
+                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button
+                        onClick={() => { setEditingColId(col.id); setEditingColName(col.name) }}
+                        className="p-1 rounded text-white/30 hover:text-white/70 hover:bg-white/5 transition-colors"
+                        title="Rename">
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        onClick={() => deleteCollection(col.id, col.name)}
+                        className="p-1 rounded text-white/30 hover:text-red-400 hover:bg-red-500/5 transition-colors"
+                        title="Delete">
+                        <Trash className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {editingColId === col.id ? (
+                    <div className="flex gap-1.5 mb-2">
+                      <input
+                        autoFocus
+                        value={editingColName}
+                        onChange={e => setEditingColName(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter') renameCollection(col.id); if (e.key === 'Escape') setEditingColId(null) }}
+                        className="flex-1 bg-white/5 border border-white/12 rounded-lg px-2.5 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500/50"
+                      />
+                      <button onClick={() => renameCollection(col.id)} className="p-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white transition-colors">
+                        <Check className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ) : (
+                    <Link href={`/collections/${col.id}`} className="block">
+                      <h3 className="font-semibold text-white text-sm mb-1 hover:text-blue-300 transition-colors line-clamp-2">
+                        {col.name}
+                      </h3>
+                    </Link>
+                  )}
+
+                  {col.description && (
+                    <p className="text-white/35 text-xs line-clamp-1 mb-2">{col.description}</p>
+                  )}
+                  <p className="text-[11px] text-white/25">
+                    {col.paperCount} paper{col.paperCount !== 1 ? 's' : ''}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Papers tab ── */}
+      {(activeTab === 'papers' || !isUser) && (
+        <div className="flex gap-5">
 
         {/* ── Left sidebar ── */}
         {sidebarOpen && (
@@ -404,7 +608,8 @@ export default function SavedPage() {
             </>
           )}
         </div>
-      </div>
+        </div>
+      )}
     </div>
   )
 }

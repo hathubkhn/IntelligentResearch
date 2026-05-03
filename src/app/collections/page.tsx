@@ -6,6 +6,7 @@ export const dynamic = 'force-dynamic'
 
 export default async function CollectionsPage() {
   const collections = await prisma.collection.findMany({
+    where: { userId: null },  // public admin collections only
     orderBy: { createdAt: 'desc' },
     include: { _count: { select: { papers: true } } },
   })
