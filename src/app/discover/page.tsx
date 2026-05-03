@@ -535,6 +535,16 @@ export default function DiscoverPage() {
           {papers.length > 0 && (
             <span className="ml-2 text-[10px] text-white/30 font-mono">{papers.length} results</span>
           )}
+          <button
+            onClick={() => setView('leaderboard')}
+            className={`flex items-center gap-1.5 px-4 py-4 text-sm border-b-2 transition-colors ${
+              view === 'leaderboard'
+                ? 'border-amber-400 text-white'
+                : 'border-transparent text-white/40 hover:text-white/70'
+            }`}
+          >
+            <Trophy className="h-3.5 w-3.5" /> Leaderboard
+          </button>
           {/* History tab — only for authenticated users */}
           {isAuth && (
             <button
@@ -548,16 +558,6 @@ export default function DiscoverPage() {
               <History className="h-3.5 w-3.5" /> History
             </button>
           )}
-          <button
-            onClick={() => setView('leaderboard')}
-            className={`flex items-center gap-1.5 px-4 py-4 text-sm border-b-2 transition-colors ${
-              view === 'leaderboard'
-                ? 'border-amber-400 text-white'
-                : 'border-transparent text-white/40 hover:text-white/70'
-            }`}
-          >
-            <Trophy className="h-3.5 w-3.5" /> Leaderboard
-          </button>
           {/* Usage badge pushed to the right */}
           {isAuth && (
             <div className="ml-auto">

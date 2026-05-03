@@ -7,8 +7,8 @@ import { Providers } from '@/components/layout/Providers'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'Applied AI Lab — Research',
-  description: 'Browse, search, and explore academic papers with AI-generated structured summaries. A project of Applied AI Lab.',
+  title: 'Intelligence Research Hub',
+  description: 'Discover AI research papers from top conferences, manage your reading list with AI summaries, and explore a curated library of papers. Built by Applied AI Lab.',
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

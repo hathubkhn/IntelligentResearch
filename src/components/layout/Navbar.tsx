@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { Bookmark, GitFork, LogOut, ChevronDown, FlaskConical, Sparkles, Crown, Zap } from 'lucide-react'
+import { Bookmark, GitFork, LogOut, ChevronDown, BrainCircuit, Sparkles, Crown, Zap } from 'lucide-react'
 import { useSession, signIn, signOut } from 'next-auth/react'
 import { useState, useRef, useEffect } from 'react'
 
@@ -16,25 +16,14 @@ export function Navbar() {
         <div className="flex h-14 items-center justify-between">
 
           {/* Brand */}
-          <div className="flex items-center gap-3">
-            <Link
-              href="https://www.appliedai-lab.com"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-1.5 group"
-            >
-              <div className="flex items-center justify-center h-7 w-7 rounded-lg bg-gradient-to-br from-blue-500 to-cyan-400 shadow-lg shadow-blue-500/25">
-                <FlaskConical className="h-3.5 w-3.5 text-white" />
+          <div className="flex items-center gap-2">
+            <Link href="/" className="flex items-center gap-2 group">
+              <div className="flex items-center justify-center h-7 w-7 rounded-lg bg-gradient-to-br from-blue-500 to-cyan-400 shadow-lg shadow-blue-500/25" aria-hidden>
+                <BrainCircuit className="h-4 w-4 text-white" strokeWidth={2} />
               </div>
-              <span className="text-sm font-semibold text-white/80 group-hover:text-white transition-colors hidden sm:block">
-                Applied AI Lab
+              <span className="text-sm font-semibold text-white group-hover:text-blue-300 transition-colors">
+                Intelligence Research Hub
               </span>
-            </Link>
-
-            <span className="text-slate-700 hidden sm:block">/</span>
-
-            <Link href="/" className="text-sm font-semibold text-white hover:text-blue-400 transition-colors">
-              Research
             </Link>
           </div>
 
