@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import https from 'https'
 import OpenAI from 'openai'
 
-export const maxDuration = 60 // seconds — OpenReview API can be slow (10-15s per page)
+export const maxDuration = 300 // seconds — paginated OpenReview fetches can take 2-3 min
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 

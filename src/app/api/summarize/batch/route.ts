@@ -1,10 +1,15 @@
 import { prisma } from '@/lib/prisma'
 import { summarizePaper } from '@/lib/openai'
 
+export const maxDuration = 300
+
+// Process 10 papers per batch call — keeps each invocation well under 300s
+const BATCH_SIZE = 10
+
 export async function POST() {
   const pendingPapers = await prisma.paper.findMany({
     where: { status: { in: ['PENDING', 'ERROR'] } },
-    take: 50,
+    take: BATCH_SIZE,
   })
 
   const encoder = new TextEncoder()

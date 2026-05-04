@@ -4,7 +4,7 @@ import { authOptions } from '@/lib/auth'
 import OpenAI from 'openai'
 import https from 'https'
 
-export const maxDuration = 60
+export const maxDuration = 300
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 const CURRENT_YEAR = new Date().getFullYear()
@@ -109,7 +109,7 @@ function openreviewFetch(params: URLSearchParams): Promise<string> {
       hostname: OPENREVIEW_IP, port: 443,
       path: `/notes/search?${params.toString()}`,
       headers: { 'Host': OPENREVIEW_HOST, 'User-Agent': 'ResearchBlog/1.0', 'Accept': 'application/json' },
-      rejectUnauthorized: false, servername: '', timeout: 25000,
+      rejectUnauthorized: false, servername: '', timeout: 20000,
     }, (res) => {
       const chunks: Buffer[] = []
       res.on('data', (c: Buffer) => chunks.push(c))
@@ -210,13 +210,13 @@ function downloadPDFBuffer(pdfUrl: string, useDirectIP: boolean): Promise<Buffer
           hostname: OPENREVIEW_IP, port: 443,
           path: parsed.pathname + parsed.search,
           headers: { 'Host': hostHeader, 'User-Agent': 'ResearchBlog/1.0', 'Accept': 'application/pdf' },
-          rejectUnauthorized: false, servername: '', timeout: 30000,
+          rejectUnauthorized: false, servername: '', timeout: 15000,
         }
       : {
           hostname: parsed.hostname, port: 443,
           path: parsed.pathname + parsed.search,
           headers: { 'User-Agent': 'ResearchBlog/1.0', 'Accept': 'application/pdf' },
-          timeout: 25000,
+          timeout: 15000,
         }
 
     const req = https.get(opts, (res) => {

@@ -1,0 +1,25 @@
+{
+  "functions": {
+    "src/app/api/discover/leaderboard/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/admin/openreview/bulk-import/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/admin/openreview/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/openreview/analyze-gaps/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/summarize/batch/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/summarize/[id]/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/posts/generate/route.ts": {
+      "maxDuration": 60
+    }
+  }
+}

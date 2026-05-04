@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import type { OpenReviewPaper } from '../route'
 
+export const maxDuration = 60
+
 const VENUE_TYPE_MAP: Record<string, 'CONFERENCE' | 'JOURNAL' | 'WORKSHOP' | 'PREPRINT'> = {
   ICLR: 'CONFERENCE',
   NeurIPS: 'CONFERENCE',

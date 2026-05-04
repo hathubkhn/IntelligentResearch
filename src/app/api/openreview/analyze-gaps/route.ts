@@ -1,4 +1,6 @@
 import { NextRequest } from 'next/server'
+
+export const maxDuration = 300
 import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 import { consumeTurn, QuotaExceededError } from '@/lib/usage'

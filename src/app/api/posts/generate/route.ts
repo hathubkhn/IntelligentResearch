@@ -1,5 +1,7 @@
 import { NextRequest } from 'next/server'
 import { getServerSession } from 'next-auth'
+
+export const maxDuration = 60
 import { authOptions } from '@/lib/auth'
 import OpenAI from 'openai'
 
